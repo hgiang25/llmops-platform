@@ -1,0 +1,43 @@
+# =============================================================
+# Training Configuration for CloudOps-LLM Fine-Tuning
+# =============================================================
+# Adjust these parameters based on your hardware and dataset.
+# Local (RTX 3090/4090): Use default values below.
+# Cloud (A100/H100): Increase batch_size, reduce gradient_accumulation.
+
+model:
+  base_model: "meta-llama/Llama-3-8B"
+  quant_type: "nf4"           # nf4 or fp4
+  double_quant: true          # Double quantization for extra VRAM savings
+
+lora:
+  r: 16                       # LoRA rank (higher = more capacity, more VRAM)
+  alpha: 32                   # LoRA scaling factor (typically 2x rank)
+  dropout: 0.05               # LoRA dropout for regularization
+  target_modules:             # Which layers to apply LoRA adapters
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+
+training:
+  num_epochs: 3
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 4   # Effective batch size = 4 * 4 = 16
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  lr_scheduler_type: "cosine"
+  max_seq_length: 2048
+  logging_steps: 10
+  output_dir: "models/cloudops-llm-adapter"
+
+dataset:
+  train_path: "data/reference/cloudops_reference.jsonl"
+  eval_path: "data/current/cloudops_current.jsonl"
+  format: "jsonl"             # JSONL with prompt/response fields
+
+# MLflow integration
+mlflow:
+  tracking_uri: "http://localhost:5000"
+  experiment_name: "cloudops-llm-finetuning"
