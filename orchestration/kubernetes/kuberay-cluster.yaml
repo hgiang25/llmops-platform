@@ -1,0 +1,34 @@
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: llmops-raycluster
+spec:
+  rayVersion: '2.9.0'
+  headGroupSpec:
+    rayStartParams:
+      dashboard-host: '0.0.0.0'
+    template:
+      spec:
+        containers:
+        - name: ray-head
+          image: rayproject/ray:2.9.0
+          resources:
+            limits:
+              cpu: "2"
+              memory: "8Gi"
+  workerGroupSpecs:
+  - groupName: gpu-group
+    replicas: 2
+    minReplicas: 1
+    maxReplicas: 5
+    rayStartParams: {}
+    template:
+      spec:
+        containers:
+        - name: ray-worker
+          image: rayproject/ray:2.9.0-gpu
+          resources:
+            limits:
+              cpu: "4"
+              memory: "16Gi"
+              nvidia.com/gpu: 1

@@ -1,0 +1,17 @@
+{
+  "title": "LLMOps Platform Overview",
+  "panels": [
+    {
+      "title": "Throughput (Tokens/s)",
+      "type": "timeseries"
+    },
+    {
+      "title": "KV Cache Hit Rate",
+      "type": "gauge"
+    },
+    {
+      "title": "GPU Utilization",
+      "type": "timeseries"
+    }
+  ]
+}

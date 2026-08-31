@@ -1,0 +1,5 @@
+lmcache:
+  backend: redis
+  redis_url: "redis://localhost:6379"
+  fallback_storage: s3
+  s3_bucket: "lmcache-bucket"
