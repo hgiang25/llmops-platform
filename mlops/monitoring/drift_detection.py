@@ -19,7 +19,9 @@ from typing import Optional
 import pandas as pd
 
 try:
+    # pyrefly: ignore [missing-import]
     from evidently import Report
+    # pyrefly: ignore [missing-import]
     from evidently.presets import DataDriftPreset
     EVIDENTLY_AVAILABLE = True
 except ImportError:
@@ -194,6 +196,7 @@ class DriftDetector:
         current_df: pd.DataFrame,
     ) -> dict:
         """Lightweight fallback using basic statistical comparisons."""
+        # pyrefly: ignore [missing-import]
         from scipy import stats
 
         drifted_columns = []

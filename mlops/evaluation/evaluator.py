@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+# pyrefly: ignore [missing-import]
 import numpy as np
 from sklearn.metrics import (
     accuracy_score,
