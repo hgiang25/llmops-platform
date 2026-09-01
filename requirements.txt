@@ -20,6 +20,13 @@ redis>=5.0.0 # for LMCache mockup
 # Orchestration
 ray[serve,default]>=2.9.0
 
+# LLM Fine-tuning (QLoRA)
+peft>=0.4.0
+trl>=0.5.0
+datasets>=2.14.0
+bitsandbytes>=0.41.0
+
+
 # MLOps & Observability
 mlflow>=2.5.0
 evidently>=0.4.0

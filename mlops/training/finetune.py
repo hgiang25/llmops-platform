@@ -49,6 +49,7 @@ class QLoRATrainer:
     def _check_gpu_available(self) -> bool:
         """Check if CUDA GPU is available."""
         try:
+            # pyrefly: ignore [missing-import]
             import torch
             return torch.cuda.is_available()
         except ImportError:
@@ -85,7 +86,9 @@ class QLoRATrainer:
             gpu_available = self._check_gpu_available()
             # Also check if peft/transformers are importable
             try:
+                # pyrefly: ignore [missing-import]
                 import peft
+                # pyrefly: ignore [missing-import]
                 import transformers
                 mock = not gpu_available
             except ImportError:
@@ -221,15 +224,20 @@ class QLoRATrainer:
         Real QLoRA fine-tuning using HuggingFace Transformers + PEFT.
         Requires GPU and the following packages: transformers, peft, trl, bitsandbytes.
         """
+        # pyrefly: ignore [missing-import]
         import torch
+        # pyrefly: ignore [missing-import]
         from transformers import (
             AutoModelForCausalLM,
             AutoTokenizer,
             TrainingArguments,
             BitsAndBytesConfig,
         )
+        # pyrefly: ignore [missing-import]
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+        # pyrefly: ignore [missing-import]
         from trl import SFTTrainer
+        # pyrefly: ignore [missing-import]
         from datasets import Dataset
 
         model_config = self.config.get("model", {})

@@ -7,8 +7,12 @@ app = FastAPI(
     version="1.0.0"
 )
 
+from prometheus_client import make_asgi_app
+
 app.include_router(router)
 
+# Mount Prometheus metrics endpoint
+app.mount("/metrics", make_asgi_app())
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

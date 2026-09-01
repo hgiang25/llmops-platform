@@ -1,8 +1,13 @@
+# pyrefly: ignore [missing-import]
 from fastapi import APIRouter, HTTPException, BackgroundTasks
+# pyrefly: ignore [missing-import]
 from pydantic import BaseModel
 from typing import Optional
 import time
 import traceback
+import asyncio
+import requests
+import os
 
 from mlops.data_pipeline.collector import DataCollector
 from mlops.pipeline import get_pipeline
@@ -35,9 +40,32 @@ class MLOpsTriggerRequest(BaseModel):
 async def chat_endpoint(request: ChatRequest):
     """
     Main chat endpoint with Difficulty-Aware Routing.
-    Now integrated with DataCollector to log every request.
+    Now integrated with actual Model Inference.
     """
     start_time = time.time()
+
+    async def call_openai_compatible_api(url: str, model_name: str, prompt: str, api_key: str = None):
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        
+        payload = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 1024,
+            "temperature": 0.7
+        }
+        
+        def _post():
+            resp = requests.post(url, json=payload, headers=headers, timeout=60)
+            resp.raise_for_status()
+            return resp.json()
+            
+        try:
+            result = await asyncio.to_thread(_post)
+            return result["choices"][0]["message"]["content"]
+        except Exception as e:
+            return f"[Error calling model {model_name} at {url}]: {str(e)}"
 
     # 1. Option for Direct Routing
     if request.direct_route:
@@ -61,19 +89,30 @@ async def chat_endpoint(request: ChatRequest):
         difficulty_score = 0.8 if len(request.prompt) > 50 else 0.2
 
         if difficulty_score < 0.4:
-            model_path = "Weak Model (Local 7B/8B)"
+            model_path = "Weak Model (vLLM Qwen 0.5B)"
             route = "weak"
-            model_used = "cloudops-llm-7b-finetuned"
+            model_used = "Qwen/Qwen2.5-0.5B-Instruct"
+            response_text = await call_openai_compatible_api("http://localhost:8001/v1/chat/completions", model_used, request.prompt)
         elif difficulty_score < 0.7:
-            model_path = "Strong Model (Disaggregated Prefill/Decode)"
+            model_path = "Strong Model (SGLang Qwen 0.5B)"
             route = "strong_disaggregated"
-            model_used = "cloudops-llm-70b-disaggregated"
+            model_used = "Qwen/Qwen2.5-0.5B-Instruct"
+            response_text = await call_openai_compatible_api("http://localhost:8002/v1/chat/completions", model_used, request.prompt)
         else:
-            model_path = "Strong Model (External API)"
+            model_path = "Strong Model (External API GPT-4o)"
             route = "strong_external"
             model_used = "gpt-4o"
+            openai_api_key = os.environ.get("OPENAI_API_KEY")
+            if openai_api_key:
+                response_text = await call_openai_compatible_api(
+                    "https://api.openai.com/v1/chat/completions", 
+                    model_used, 
+                    request.prompt, 
+                    api_key=openai_api_key
+                )
+            else:
+                response_text = "Mock response: Vui lòng cấu hình biến môi trường OPENAI_API_KEY để dùng gpt-4o thật cho các câu hỏi cực khó."
 
-        response_text = f"Mock response processed by {model_path}"
         elapsed = (time.time() - start_time) * 1000
 
         # Log the request to DataCollector
