@@ -62,6 +62,7 @@ def start_scheduler():
     # For demonstration purposes, we schedule it to run every 1 minute.
     # In production, you would do: schedule.every().day.at("02:00").do(job_run_mlops_pipeline)
     schedule.every().day.at("02:00").do(job_run_mlops_pipeline)
+
     
     logging.info("Scheduler is active. Waiting for the next tick (1 minute)...")
     
