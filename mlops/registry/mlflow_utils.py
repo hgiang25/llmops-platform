@@ -20,7 +20,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+# pyrefly: ignore [missing-import]
 import mlflow
+# pyrefly: ignore [missing-import]
 from mlflow.tracking import MlflowClient
 
 
@@ -39,6 +41,11 @@ class ModelRegistry:
     ):
         self.tracking_uri = tracking_uri
         self.default_experiment = default_experiment
+
+        # Set S3/MinIO credentials for artifact logging
+        os.environ["AWS_ACCESS_KEY_ID"] = os.environ.get("AWS_ACCESS_KEY_ID", "minio_admin")
+        os.environ["AWS_SECRET_ACCESS_KEY"] = os.environ.get("AWS_SECRET_ACCESS_KEY", "minio_password123")
+        os.environ["MLFLOW_S3_ENDPOINT_URL"] = os.environ.get("MLFLOW_S3_ENDPOINT_URL", "http://localhost:9000")
 
         mlflow.set_tracking_uri(self.tracking_uri)
         self.client = MlflowClient(tracking_uri=self.tracking_uri)
