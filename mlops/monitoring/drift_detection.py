@@ -116,10 +116,8 @@ class DriftDetector:
         ref = reference_df[monitor_cols].copy()
         cur = current_df[monitor_cols].copy()
 
-        if EVIDENTLY_AVAILABLE:
-            return self._check_drift_evidently(ref, cur, save_html_report)
-        else:
-            return self._check_drift_statistical(ref, cur)
+        # FORCE using the advanced statistical ensemble method for the thesis
+        return self._check_drift_statistical(ref, cur)
 
     def _check_drift_evidently(
         self,
@@ -195,9 +193,35 @@ class DriftDetector:
         reference_df: pd.DataFrame,
         current_df: pd.DataFrame,
     ) -> dict:
-        """Lightweight fallback using basic statistical comparisons."""
+        """Ensemble fallback using KL Divergence, PSI, and KS Test with 2/3 voting."""
         # pyrefly: ignore [missing-import]
         from scipy import stats
+        import numpy as np
+
+        def calculate_psi_and_kl(ref_vals, cur_vals, buckets=10):
+            min_val = min(np.min(ref_vals), np.min(cur_vals))
+            max_val = max(np.max(ref_vals), np.max(cur_vals))
+            
+            # Avoid single bin issue if min == max
+            if min_val == max_val:
+                return 0.0, 0.0
+                
+            bins = np.linspace(min_val, max_val, buckets + 1)
+            
+            ref_hist, _ = np.histogram(ref_vals, bins=bins)
+            cur_hist, _ = np.histogram(cur_vals, bins=bins)
+            
+            ref_pct = ref_hist / len(ref_vals)
+            cur_pct = cur_hist / len(cur_vals)
+            
+            eps = 1e-4
+            ref_pct_safe = np.where(ref_pct == 0, eps, ref_pct)
+            cur_pct_safe = np.where(cur_pct == 0, eps, cur_pct)
+            
+            psi_value = np.sum((cur_pct_safe - ref_pct_safe) * np.log(cur_pct_safe / ref_pct_safe))
+            kl_value = stats.entropy(cur_pct_safe, ref_pct_safe)
+            
+            return psi_value, kl_value
 
         drifted_columns = []
         column_details = {}
@@ -210,15 +234,28 @@ class DriftDetector:
             if len(ref_vals) == 0 or len(cur_vals) == 0:
                 continue
 
-            # Kolmogorov-Smirnov test
+            # KS Test
             ks_stat, p_value = stats.ks_2samp(ref_vals, cur_vals)
-            col_drift = p_value < 0.05
+            ks_drift = p_value < 0.05
+            
+            # PSI and KL Divergence
+            psi_val, kl_val = calculate_psi_and_kl(ref_vals, cur_vals)
+            psi_drift = psi_val > 0.2  # Standard PSI threshold for significant change
+            kl_drift = kl_val > 0.1    # Standard KL threshold
+
+            # Voting 2/3 mechanism
+            drift_votes = sum([ks_drift, psi_drift, kl_drift])
+            col_drift = drift_votes >= 2
 
             column_details[col] = {
                 "drift_detected": bool(col_drift),
-                "drift_score": round(float(p_value), 6),
-                "stattest_name": "ks_2samp",
-                "ks_statistic": round(float(ks_stat), 6),
+                "ks_drift": bool(ks_drift),
+                "psi_drift": bool(psi_drift),
+                "kl_drift": bool(kl_drift),
+                "ks_p_value": round(float(p_value), 6),
+                "psi_value": round(float(psi_val), 6),
+                "kl_value": round(float(kl_val), 6),
+                "stattest_name": "ensemble_2_of_3",
             }
             if col_drift:
                 drifted_columns.append(col)
