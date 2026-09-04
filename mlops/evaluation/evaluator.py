@@ -92,12 +92,7 @@ class ModelEvaluator:
 
         # Predicted routing decisions
         if predicted_scores is None:
-            # Simulate predictions with some noise (mock predictor)
-            rng = np.random.RandomState(42)
-            noise = rng.normal(0, 0.08, size=len(true_scores))
-            predicted_scores = [
-                max(0.0, min(1.0, s + n)) for s, n in zip(true_scores, noise)
-            ]
+            return {"error": "predicted_scores must be provided (run predict_scores first)."}
 
         pred_routes = [self._score_to_route(s) for s in predicted_scores]
         pred_binary = [self._score_to_binary(s) for s in predicted_scores]
@@ -239,6 +234,74 @@ class ModelEvaluator:
                      f"or misrouting rate increased"
             ),
         }
+
+    def predict_scores(self, model_path: str, test_data: list[dict]) -> list[float]:
+        """
+        Run actual inference using the fine-tuned model to predict difficulty scores.
+        """
+        # pyrefly: ignore [missing-import]
+        import torch
+        # pyrefly: ignore [missing-import]
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        
+        print(f"[EVAL] Loading model for inference from {model_path}...")
+        
+        # Handle MLflow file:/// artifact URIs
+        if model_path.startswith("file:///"):
+            model_path = model_path[8:]
+        elif model_path.startswith("file://"):
+            model_path = model_path[7:]
+            
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            device_map="auto",
+            trust_remote_code=True,
+            torch_dtype=torch.float16,
+        )
+        model.eval()
+
+        predicted_scores = []
+        print(f"[EVAL] Running inference on {len(test_data)} samples...")
+        
+        for r in test_data:
+            prompt = r.get("prompt", "")
+            input_text = (
+                f"### Instruction:\n{prompt}\n\n"
+                f"### Score:\n"
+            )
+            inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
+            
+            with torch.no_grad():
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=10,
+                    pad_token_id=tokenizer.eos_token_id,
+                    temperature=0.1,
+                    do_sample=False,
+                )
+            
+            generated_text = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+            
+            # Extract score from generated text
+            try:
+                # The score should be the first float in the generated text
+                words = generated_text.strip().split()
+                if not words:
+                    score = 0.5
+                else:
+                    score = float(words[0])
+                score = max(0.0, min(1.0, score))
+            except Exception:
+                score = 0.5  # default on parsing failure
+                
+            predicted_scores.append(score)
+            
+        return predicted_scores
+
 
     def _save_report(self, report: dict):
         """Save evaluation report as JSON."""

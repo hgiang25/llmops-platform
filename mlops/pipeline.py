@@ -11,7 +11,14 @@ Luồng xử lý chính:
   7. Deploy                   → Promote model lên Production stage
 
 Hỗ trợ cả chế độ chạy thủ công (CLI) và trigger qua API Gateway.
+
+📝 LƯU Ý KHI ĐƯA LÊN PRODUCTION:
+Hiện tại bước 1 (Generate Data) đang dùng dữ liệu mô phỏng (Synthetic Data/Mocker) để chứng minh khả năng phát hiện Drift. Khi đưa vào thực tế, bạn cần sửa lại bước 1 để truy vấn data thật từ API Gateway Logs (ví dụ: query từ Database hoặc đọc file JSONL sinh ra từ DataCollector).
 """
+
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import json
 import time
@@ -131,8 +138,10 @@ class MLOpsPipeline:
             # ----------------------------------------------------------
             # Step 6: Evaluate New Model
             # ----------------------------------------------------------
-            self._log_step("EVAL", "Evaluating newly trained model...")
-            new_eval = self._step_evaluate(model_name="router_retrained")
+            adapter_path = train_result.get("adapter_path")
+            self._log_step("EVAL", f"Evaluating newly trained model from {adapter_path}...")
+            # pyrefly: ignore [unexpected-keyword]
+            new_eval = self._step_evaluate(model_name="router_retrained", model_path=adapter_path)
 
             self._log_step(
                 "EVAL",
@@ -197,7 +206,18 @@ class MLOpsPipeline:
     # ==================================================================
 
     def _step_generate_data(self, generate: bool) -> dict:
-        """Step 1: Generate synthetic data."""
+        """
+        Step 1: Generate or Collect data.
+        
+        [MOCKER/TESTING LƯU Ý]
+        Hiện tại hàm này đang gọi `generate_dataset` để sinh dữ liệu giả (Synthetic)
+        nhằm mục đích demo chức năng Data Drift (sự thay đổi hành vi user).
+        
+        => KHI LÊN PRODUCTION: 
+        Bạn hãy xóa đoạn generate_dataset đi, thay vào đó:
+        - ref_data: Lấy từ log cũ của DataCollector
+        - current_data: Truy vấn các request mới nhất từ DataCollector log (raw data).
+        """
         if not generate:
             return {"status": "skipped"}
 
@@ -222,22 +242,51 @@ class MLOpsPipeline:
         detector = DriftDetector()
         return detector.check_drift()
 
-    def _step_evaluate(self, model_name: str = "router_model") -> dict:
+    def _step_evaluate(self, model_name: str = "router_model", model_path: str = None) -> dict:
         """Step 3/6: Evaluate a model."""
         from mlops.evaluation.evaluator import ModelEvaluator
         from mlops.data_pipeline.synthetic_data import generate_dataset
+        import os
 
         evaluator = ModelEvaluator()
         test_data = generate_dataset(n_samples=100, mode="reference", seed=123)
-        return evaluator.evaluate(test_data, model_name=model_name)
+        
+        # If no model_path is provided, resolve the current model
+        if not model_path:
+            from mlops.registry.mlflow_utils import ModelRegistry
+            registry = ModelRegistry()
+            model_info = registry.load_model(model_name="cloudops-router")
+            if "error" not in model_info:
+                model_path = model_info.get("source")
+            else:
+                model_path = "models/cloudops-llm-adapter"
+
+        # Remove URI scheme for local file check
+        local_path = model_path.replace("file:///", "").replace("file://", "")
+        if not os.path.exists(local_path):
+            return {"error": f"Model path {model_path} not found."}
+
+        try:
+            predicted_scores = evaluator.predict_scores(local_path, test_data)
+            return evaluator.evaluate(test_data, predicted_scores=predicted_scores, model_name=model_name)
+        except Exception as e:
+            return {"error": str(e)}
 
     def _step_retrain(self) -> dict:
-        """Step 5: Run QLoRA fine-tuning."""
+        """
+        Run the QLoRA fine-tuning process on the current dataset.
+        Returns the path to the newly trained adapter.
+        """
+        # pyrefly: ignore [missing-import]
         from mlops.training.finetune import QLoRATrainer, load_train_config
 
+        dataset_path = "data/reference/cloudops_reference.jsonl"
+        
+        # Initialize and run finetuner
         config = load_train_config()
-        trainer = QLoRATrainer(config=config)
-        return trainer.train()
+        finetuner = QLoRATrainer(config=config)
+        # Pass self._log_step as callback to stream logs to the UI
+        return finetuner.train(dataset_path, callback=self._log_step)
 
     def _step_register(self, train_result: dict, eval_report: dict) -> dict:
         """Step 8: Register model to MLflow."""
