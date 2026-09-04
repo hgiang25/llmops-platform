@@ -1,3 +1,5 @@
+--extra-index-url https://download.pytorch.org/whl/cu121
+
 # API Gateway & Web UI
 fastapi>=0.100.0
 uvicorn>=0.22.0

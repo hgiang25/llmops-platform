@@ -1,4 +1,6 @@
+# pyrefly: ignore [missing-import]
 from ray import serve
+# pyrefly: ignore [missing-import]
 from fastapi import FastAPI
 
 app = FastAPI()

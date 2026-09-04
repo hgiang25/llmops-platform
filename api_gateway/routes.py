@@ -17,6 +17,75 @@ router = APIRouter()
 # Initialize shared DataCollector (singleton-like)
 data_collector = DataCollector(log_dir="data/raw")
 
+# =====================================================================
+# Router Model Predictor (Singleton)
+# =====================================================================
+
+class RouterPredictor:
+    _model = None
+    _tokenizer = None
+    _is_loaded = False
+
+    @classmethod
+    def predict(cls, prompt: str) -> float:
+        if not cls._is_loaded:
+            from mlops.registry.mlflow_utils import ModelRegistry
+            registry = ModelRegistry()
+            model_info = registry.load_model(model_name="cloudops-router")
+            
+            if "error" in model_info:
+                print(f"[API] MLflow load failed ({model_info['error']}). Falling back to local adapter.")
+                model_path = "models/cloudops-llm-adapter"
+                if not os.path.exists(model_path):
+                    print("[API] Local adapter not found. Using fallback mock.")
+                    return 0.8 if len(prompt) > 50 else 0.2
+            else:
+                model_path = model_info.get("source")
+                if model_path.startswith("file:///"):
+                    model_path = model_path[8:]
+                elif model_path.startswith("file://"):
+                    model_path = model_path[7:]
+                
+            # pyrefly: ignore [missing-import]
+            import torch
+            # pyrefly: ignore [missing-import]
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            print(f"[API] Loading router model from {model_path}...")
+            cls._tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+            if cls._tokenizer.pad_token is None:
+                cls._tokenizer.pad_token = cls._tokenizer.eos_token
+                
+            cls._model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                device_map="auto",
+                trust_remote_code=True,
+                torch_dtype=torch.float16,
+            )
+            cls._model.eval()
+            cls._is_loaded = True
+
+        input_text = f"### Instruction:\n{prompt}\n\n### Score:\n"
+        inputs = cls._tokenizer(input_text, return_tensors="pt").to(cls._model.device)
+        
+        # pyrefly: ignore [missing-import]
+        import torch
+        with torch.no_grad():
+            outputs = cls._model.generate(
+                **inputs,
+                max_new_tokens=10,
+                pad_token_id=cls._tokenizer.eos_token_id,
+                temperature=0.1,
+                do_sample=False,
+            )
+        generated_text = cls._tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+        try:
+            words = generated_text.strip().split()
+            score = float(words[0]) if words else 0.5
+            return max(0.0, min(1.0, score))
+        except Exception:
+            return 0.5
+
+
 
 # =====================================================================
 # Request / Response Models
@@ -64,6 +133,9 @@ async def chat_endpoint(request: ChatRequest):
         try:
             result = await asyncio.to_thread(_post)
             return result["choices"][0]["message"]["content"]
+        except requests.exceptions.ConnectionError:
+            # Fallback for local development when vLLM/SGLang is not running
+            return f"(Mô phỏng) Mô hình {model_name} đang phản hồi... Vui lòng bật server vLLM/SGLang tại {url} để nhận phản hồi thật."
         except Exception as e:
             return f"[Error calling model {model_name} at {url}]: {str(e)}"
 
@@ -85,8 +157,8 @@ async def chat_endpoint(request: ChatRequest):
 
     # 2. Difficulty-Aware Routing
     try:
-        # Mock difficulty scoring (replace with actual Router model later)
-        difficulty_score = 0.8 if len(request.prompt) > 50 else 0.2
+        # Use real Router model (or fallback if Day 0)
+        difficulty_score = await asyncio.to_thread(RouterPredictor.predict, request.prompt)
 
         if difficulty_score < 0.4:
             model_path = "Weak Model (vLLM Qwen 0.5B)"
