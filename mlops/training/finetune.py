@@ -55,12 +55,7 @@ class QLoRATrainer:
         except ImportError:
             return False
 
-    def train(
-        self,
-        dataset_path: str = None,
-        output_dir: str = None,
-        mock: bool = None,
-    ) -> dict:
+    def train(self, dataset_path: str = None, output_dir: str = None, mock: bool = None, callback=None) -> dict:
         """
         Run the fine-tuning pipeline.
 
@@ -68,38 +63,33 @@ class QLoRATrainer:
             dataset_path: Path to training data (JSONL format).
             output_dir: Directory to save adapter weights.
             mock: If True, simulate training without GPU. If None, auto-detect.
+            callback: Optional callback for UI log streaming.
 
         Returns:
             Training result dict with metrics and artifact paths.
         """
         # Resolve config
-        model_config = self.config.get("model", {})
-        lora_config = self.config.get("lora", {})
-        train_config = self.config.get("training", {})
         dataset_config = self.config.get("dataset", {})
+        train_config = self.config.get("training", {})
 
         dataset_path = dataset_path or dataset_config.get("train_path", "data/reference/cloudops_reference.jsonl")
         output_dir = output_dir or train_config.get("output_dir", "models/cloudops-llm-adapter")
 
         # Auto-detect mode
         if mock is None:
-            gpu_available = self._check_gpu_available()
-            # Also check if peft/transformers are importable
-            try:
-                # pyrefly: ignore [missing-import]
-                import peft
-                # pyrefly: ignore [missing-import]
-                import transformers
-                mock = not gpu_available
-            except ImportError:
-                mock = True
+            mock = False
 
         if mock:
-            return self._mock_train(dataset_path, output_dir)
+            return self._mock_train(dataset_path, output_dir, callback=callback)
         else:
-            return self._real_train(dataset_path, output_dir)
+            # Basic check to see if we're on a machine with a GPU
+            import torch
+            if not torch.cuda.is_available():
+                return self._mock_train(dataset_path, output_dir, callback=callback)
+            else:
+                return self._real_train(dataset_path, output_dir, callback=callback)
 
-    def _mock_train(self, dataset_path: str, output_dir: str) -> dict:
+    def _mock_train(self, dataset_path: str, output_dir: str, callback=None) -> dict:
         """
         Simulate training for demo purposes.
         Generates realistic-looking training logs and mock metrics.
@@ -147,6 +137,9 @@ class QLoRATrainer:
             base_loss = 2.5 * (0.6 ** epoch) + 0.3
             for step in range(1, steps_per_epoch + 1):
                 global_step = (epoch - 1) * steps_per_epoch + step
+                current_loss = base_loss + (0.05 * (step / steps_per_epoch))
+                if callback and step % 10 == 0:
+                    callback("TRAIN", f"Epoch {epoch} Step {global_step}/{total_steps}: Loss = {current_loss:.4f}")
                 loss = base_loss - (step / steps_per_epoch) * 0.3 + (hash(global_step) % 100) / 500
                 loss = max(0.15, loss)
 
@@ -219,7 +212,7 @@ class QLoRATrainer:
 
         return result
 
-    def _real_train(self, dataset_path: str, output_dir: str) -> dict:
+    def _real_train(self, dataset_path: str, output_dir: str, callback=None) -> dict:
         """
         Real QLoRA fine-tuning using HuggingFace Transformers + PEFT.
         Requires GPU and the following packages: transformers, peft, trl, bitsandbytes.
@@ -230,13 +223,12 @@ class QLoRATrainer:
         from transformers import (
             AutoModelForCausalLM,
             AutoTokenizer,
-            TrainingArguments,
             BitsAndBytesConfig,
         )
         # pyrefly: ignore [missing-import]
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
         # pyrefly: ignore [missing-import]
-        from trl import SFTTrainer
+        from trl import SFTTrainer, SFTConfig
         # pyrefly: ignore [missing-import]
         from datasets import Dataset
 
@@ -248,26 +240,39 @@ class QLoRATrainer:
         
         print(f"\nLoading base model: {model_name}")
 
-        # Quantization config (4-bit for QLoRA)
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type=model_config.get("quant_type", "nf4"),
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=model_config.get("double_quant", True),
-        )
+        is_gpt2 = "gpt2" in model_name.lower()
 
-        # Load model and tokenizer
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            quantization_config=bnb_config,
-            device_map="auto",
-            trust_remote_code=True,
-        )
+        if is_gpt2:
+            print("Using GPT-2: Disabling 4-bit quantization for compatibility.")
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                trust_remote_code=True,
+                torch_dtype=torch.float16,
+            )
+        else:
+            # Quantization config (4-bit for QLoRA)
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type=model_config.get("quant_type", "nf4"),
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=model_config.get("double_quant", True),
+            )
+
+            # Load model
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                quantization_config=bnb_config,
+                device_map="auto",
+                trust_remote_code=True,
+                torch_dtype=torch.bfloat16,
+            )
+
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         tokenizer.pad_token = tokenizer.eos_token
 
         # Prepare model for k-bit training
-        model = prepare_model_for_kbit_training(model)
+        if not is_gpt2:
+            model = prepare_model_for_kbit_training(model)
 
         # LoRA configuration
         lora_config = LoraConfig(
@@ -293,7 +298,7 @@ class QLoRATrainer:
                     # Format as instruction-following
                     text = (
                         f"### Instruction:\n{r.get('prompt', '')}\n\n"
-                        f"### Response:\n{r.get('response_text', '')}"
+                        f"### Score:\n{r.get('difficulty_score', '')}"
                     )
                     records.append({"text": text})
         
@@ -306,29 +311,39 @@ class QLoRATrainer:
             deepspeed_config = str(ds_path)
 
         # Training arguments
-        training_args = TrainingArguments(
+        training_args = SFTConfig(
             output_dir=output_dir,
             num_train_epochs=train_config.get("num_epochs", 3),
             per_device_train_batch_size=train_config.get("per_device_train_batch_size", 4),
             gradient_accumulation_steps=train_config.get("gradient_accumulation_steps", 4),
             learning_rate=train_config.get("learning_rate", 2e-4),
             weight_decay=train_config.get("weight_decay", 0.01),
-            warmup_ratio=train_config.get("warmup_ratio", 0.1),
+            warmup_steps=0,
             lr_scheduler_type=train_config.get("lr_scheduler_type", "cosine"),
             logging_steps=train_config.get("logging_steps", 10),
             save_strategy="epoch",
-            fp16=True,
+            bf16=True,
+            fp16=False,
             deepspeed=deepspeed_config,
             report_to="none",  # We handle MLflow logging separately
+            max_length=train_config.get("max_seq_length", 2048),
         )
+
+        # Trainer callback for UI streaming
+        from transformers import TrainerCallback
+        class UILogCallback(TrainerCallback):
+            def on_log(self, args, state, control, logs=None, **kwargs):
+                if callback and logs and "loss" in logs:
+                    loss = logs.get("loss")
+                    callback("TRAIN", f"Step {state.global_step}/{state.max_steps}: Loss = {loss:.4f}")
 
         # Initialize trainer
         trainer = SFTTrainer(
             model=model,
             args=training_args,
             train_dataset=dataset,
-            tokenizer=tokenizer,
-            max_seq_length=train_config.get("max_seq_length", 2048),
+            processing_class=tokenizer,
+            callbacks=[UILogCallback()] if callback else None,
         )
 
         # Train

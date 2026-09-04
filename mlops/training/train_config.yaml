@@ -6,7 +6,7 @@
 # Cloud (A100/H100): Increase batch_size, reduce gradient_accumulation.
 
 model:
-  base_model: "meta-llama/Llama-3-8B"
+  base_model: "Qwen/Qwen2.5-0.5B"
   quant_type: "nf4"           # nf4 or fp4
   double_quant: true          # Double quantization for extra VRAM savings
 
