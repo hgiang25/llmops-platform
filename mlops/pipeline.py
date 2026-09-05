@@ -209,28 +209,54 @@ class MLOpsPipeline:
         """
         Step 1: Generate or Collect data.
         
-        [MOCKER/TESTING LƯU Ý]
-        Hiện tại hàm này đang gọi `generate_dataset` để sinh dữ liệu giả (Synthetic)
-        nhằm mục đích demo chức năng Data Drift (sự thay đổi hành vi user).
-        
-        => KHI LÊN PRODUCTION: 
-        Bạn hãy xóa đoạn generate_dataset đi, thay vào đó:
-        - ref_data: Lấy từ log cũ của DataCollector
-        - current_data: Truy vấn các request mới nhất từ DataCollector log (raw data).
+        Sử dụng tập dữ liệu thực tế (Real-world Big Data) được cào từ HuggingFace 
+        (nằm trong `data/raw/cloudops_real_dataset.jsonl`).
+        - ref_data: Nửa đầu của tập dữ liệu (Đại diện cho baseline).
+        - current_data: Nửa sau của tập dữ liệu (Đại diện cho log người dùng hôm nay).
         """
         if not generate:
             return {"status": "skipped"}
 
-        from mlops.data_pipeline.synthetic_data import generate_dataset, save_dataset
-
-        ref_data = generate_dataset(n_samples=300, mode="reference", seed=42)
-        save_dataset(ref_data, "data/reference/cloudops_reference.jsonl")
-
-        current_data = generate_dataset(n_samples=300, mode="drifted", seed=99)
-        save_dataset(current_data, "data/current/cloudops_current.jsonl")
+        import json
+        import os
+        from pathlib import Path
+        
+        raw_data_path = "data/raw/cloudops_real_dataset.jsonl"
+        
+        if not os.path.exists(raw_data_path):
+            raise FileNotFoundError(f"Không tìm thấy Real Dataset tại {raw_data_path}. Vui lòng chạy hf_data_ingestor.py trước!")
+            
+        # Read all records from the real dataset
+        records = []
+        with open(raw_data_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+                    
+        total_records = len(records)
+        if total_records < 2:
+            raise ValueError("Dataset quá nhỏ, không đủ để chia đôi!")
+            
+        # Split into reference (first half) and current (second half)
+        mid_point = total_records // 2
+        ref_data = records[:mid_point]
+        current_data = records[mid_point:]
+        
+        # Save them to their respective locations
+        Path("data/reference").mkdir(parents=True, exist_ok=True)
+        with open("data/reference/cloudops_reference.jsonl", "w", encoding="utf-8") as f:
+            for record in ref_data:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                
+        Path("data/current").mkdir(parents=True, exist_ok=True)
+        with open("data/current/cloudops_current.jsonl", "w", encoding="utf-8") as f:
+            for record in current_data:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
         return {
             "status": "generated",
+            "source": "huggingface_real_data",
             "reference_samples": len(ref_data),
             "current_samples": len(current_data),
         }

@@ -58,8 +58,9 @@ def determine_domain(prompt: str) -> str:
 def ingest_huggingface_data(
     dataset_name: str = "tatsu-lab/alpaca", 
     split: str = "train",
-    max_samples: int = 1000,
-    output_file: str = "data/raw/cloudops_real_dataset.jsonl"
+    max_samples: int = 20000,
+    output_file: str = "data/raw/cloudops_real_dataset.jsonl",
+    resume: bool = False
 ):
     print(f"Starting Data Ingestion Pipeline from HuggingFace ({dataset_name})...")
     print("Mode: STREAMING (Optimized for Big Data, No RAM Overflow)")
@@ -71,10 +72,19 @@ def ingest_huggingface_data(
     path = Path(output_file)
     path.parent.mkdir(parents=True, exist_ok=True)
     
+    existing_count = 0
+    if resume and path.exists():
+        with open(path, "r", encoding="utf-8") as f:
+            existing_count = sum(1 for _ in f)
+        print(f"Resume mode: Found {existing_count} existing records. Will skip them and fetch {max_samples} more.")
+    
     collected_count = 0
+    match_count = 0
     start_time = time.time()
     
-    with open(path, "w", encoding="utf-8") as f:
+    file_mode = "a" if resume and existing_count > 0 else "w"
+    
+    with open(path, file_mode, encoding="utf-8") as f:
         for idx, row in enumerate(dataset):
             # Extract prompt depending on dataset structure
             
@@ -97,6 +107,11 @@ def ingest_huggingface_data(
             
             # 2. Filter: Only keep CloudOps related data
             if not any(kw in prompt_lower for kw in CLOUDOPS_KEYWORDS):
+                continue
+                
+            match_count += 1
+            if resume and match_count <= existing_count:
+                # Silently skip records we already have in the file
                 continue
                 
             # 3. Labeling: Simulate LLM-as-a-Judge for difficulty score
@@ -151,7 +166,8 @@ def ingest_huggingface_data(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="HuggingFace Data Ingestor")
     parser.add_argument("--dataset", type=str, default="tatsu-lab/alpaca", help="HF Dataset name")
-    parser.add_argument("--max_samples", type=int, default=500, help="Maximum samples to collect")
+    parser.add_argument("--max_samples", type=int, default=20000, help="Maximum samples to collect")
+    parser.add_argument("--resume", action="store_true", help="Resume fetching without overwriting existing data")
     
     args = parser.parse_args()
-    ingest_huggingface_data(dataset_name=args.dataset, max_samples=args.max_samples)
+    ingest_huggingface_data(dataset_name=args.dataset, max_samples=args.max_samples, resume=args.resume)
