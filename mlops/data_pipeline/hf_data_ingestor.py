@@ -112,6 +112,8 @@ def ingest_huggingface_data(
             match_count += 1
             if resume and match_count <= existing_count:
                 # Silently skip records we already have in the file
+                if match_count % 1000 == 0:
+                    print(f"⏩ [Resume Mode] Đang bỏ qua các bản ghi cũ... ({match_count}/{existing_count})")
                 continue
                 
             # 3. Labeling: Simulate LLM-as-a-Judge for difficulty score

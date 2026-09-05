@@ -48,6 +48,7 @@ def ingest_ultrafeedback(
     Returns:
         Dict with ingestion statistics.
     """
+    # pyrefly: ignore [missing-import]
     from datasets import load_dataset
     
     print("=" * 60)
@@ -183,6 +184,7 @@ def ingest_chatbot_arena(
     Returns:
         Dict with ingestion statistics.
     """
+    # pyrefly: ignore [missing-import]
     from datasets import load_dataset
     
     print("=" * 60)

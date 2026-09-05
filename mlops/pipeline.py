@@ -208,11 +208,7 @@ class MLOpsPipeline:
     def _step_generate_data(self, generate: bool) -> dict:
         """
         Step 1: Generate or Collect data.
-        
-        Sử dụng tập dữ liệu thực tế (Real-world Big Data) được cào từ HuggingFace 
-        (nằm trong `data/raw/cloudops_real_dataset.jsonl`).
-        - ref_data: Nửa đầu của tập dữ liệu (Đại diện cho baseline).
-        - current_data: Nửa sau của tập dữ liệu (Đại diện cho log người dùng hôm nay).
+        Sử dụng batch scorer để chấm điểm log thực tế từ API Gateway.
         """
         if not generate:
             return {"status": "skipped"}
@@ -220,45 +216,53 @@ class MLOpsPipeline:
         import json
         import os
         from pathlib import Path
+        from mlops.data_pipeline.batch_scorer import run_batch_scoring
         
+        # 1. Đảm bảo Reference data tồn tại (dùng nửa đầu của cloudops_real_dataset)
         raw_data_path = "data/raw/cloudops_real_dataset.jsonl"
+        ref_data_path = "data/reference/cloudops_reference.jsonl"
         
-        if not os.path.exists(raw_data_path):
-            raise FileNotFoundError(f"Không tìm thấy Real Dataset tại {raw_data_path}. Vui lòng chạy hf_data_ingestor.py trước!")
-            
-        # Read all records from the real dataset
-        records = []
-        with open(raw_data_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
+        if not os.path.exists(ref_data_path) and os.path.exists(raw_data_path):
+            records = []
+            with open(raw_data_path, "r", encoding="utf-8") as f:
+                for line in f:
                     records.append(json.loads(line))
+            mid = len(records) // 2
+            Path("data/reference").mkdir(parents=True, exist_ok=True)
+            with open(ref_data_path, "w", encoding="utf-8") as f:
+                for record in records[:mid]:
+                    # Gán nhãn cho reference data
+                    score = record.get("difficulty_score", 0.5)
+                    label = 0 if score < 0.4 else (1 if score < 0.7 else 2)
+                    record["ground_truth_label"] = label
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
                     
-        total_records = len(records)
-        if total_records < 2:
-            raise ValueError("Dataset quá nhỏ, không đủ để chia đôi!")
-            
-        # Split into reference (first half) and current (second half)
-        mid_point = total_records // 2
-        ref_data = records[:mid_point]
-        current_data = records[mid_point:]
+        # 2. Chạy Batch Scorer trên logs của API Gateway để tạo Current data
+        log_path = "data/raw/prompts_log.jsonl"
+        current_data_path = "data/current/cloudops_current.jsonl"
         
-        # Save them to their respective locations
-        Path("data/reference").mkdir(parents=True, exist_ok=True)
-        with open("data/reference/cloudops_reference.jsonl", "w", encoding="utf-8") as f:
-            for record in ref_data:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-                
-        Path("data/current").mkdir(parents=True, exist_ok=True)
-        with open("data/current/cloudops_current.jsonl", "w", encoding="utf-8") as f:
-            for record in current_data:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if os.path.exists(log_path):
+            self._log_step("DATA", "Chạy Batch Scorer trên log thực tế của API Gateway...")
+            run_batch_scoring(input_log_path=log_path, output_path=current_data_path)
+        else:
+            self._log_step("DATA", "Không tìm thấy API log, tạo mock dữ liệu từ Real Dataset...")
+            if os.path.exists(raw_data_path):
+                records = []
+                with open(raw_data_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        records.append(json.loads(line))
+                mid = len(records) // 2
+                Path("data/current").mkdir(parents=True, exist_ok=True)
+                with open(current_data_path, "w", encoding="utf-8") as f:
+                    for record in records[mid:mid+500]: # Lấy 500 records
+                        score = record.get("difficulty_score", 0.5)
+                        label = 0 if score < 0.4 else (1 if score < 0.7 else 2)
+                        record["ground_truth_label"] = label
+                        f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
         return {
             "status": "generated",
-            "source": "huggingface_real_data",
-            "reference_samples": len(ref_data),
-            "current_samples": len(current_data),
+            "source": "batch_scorer",
         }
 
     def _step_detect_drift(self) -> dict:
@@ -271,11 +275,26 @@ class MLOpsPipeline:
     def _step_evaluate(self, model_name: str = "router_model", model_path: str = None) -> dict:
         """Step 3/6: Evaluate a model."""
         from mlops.evaluation.evaluator import ModelEvaluator
-        from mlops.data_pipeline.synthetic_data import generate_dataset
         import os
+        import json
+        import random
 
         evaluator = ModelEvaluator()
-        test_data = generate_dataset(n_samples=100, mode="reference", seed=123)
+        
+        # Load test data từ reference dataset thay vì mock data
+        test_data = []
+        ref_path = "data/reference/cloudops_reference.jsonl"
+        if os.path.exists(ref_path):
+            with open(ref_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        test_data.append(json.loads(line))
+            # Sample 100 records for fast evaluation
+            random.seed(123)
+            test_data = random.sample(test_data, min(100, len(test_data)))
+        else:
+            self._log_step("ERROR", f"Không tìm thấy file eval {ref_path}")
+            test_data = []
         
         # If no model_path is provided, resolve the current model
         if not model_path:
@@ -294,6 +313,7 @@ class MLOpsPipeline:
 
         try:
             predicted_scores = evaluator.predict_scores(local_path, test_data)
+            # pyrefly: ignore [unexpected-keyword]
             return evaluator.evaluate(test_data, predicted_scores=predicted_scores, model_name=model_name)
         except Exception as e:
             return {"error": str(e)}

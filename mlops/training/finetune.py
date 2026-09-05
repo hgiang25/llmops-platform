@@ -367,6 +367,7 @@ class QLoRATrainer:
             gradient_accumulation_steps=train_config.get("gradient_accumulation_steps", 8),
             learning_rate=train_config.get("learning_rate", 2e-4),
             weight_decay=train_config.get("weight_decay", 0.01),
+            # pyrefly: ignore [unexpected-keyword]
             warmup_ratio=train_config.get("warmup_ratio", 0.1),
             lr_scheduler_type=train_config.get("lr_scheduler_type", "cosine"),
             logging_steps=train_config.get("logging_steps", 10),

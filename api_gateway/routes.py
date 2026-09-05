@@ -27,7 +27,7 @@ class RouterPredictor:
     _is_loaded = False
 
     @classmethod
-    def predict(cls, prompt: str) -> float:
+    def predict(cls, prompt: str) -> int:
         if not cls._is_loaded:
             from mlops.registry.mlflow_utils import ModelRegistry
             registry = ModelRegistry()
@@ -38,7 +38,7 @@ class RouterPredictor:
                 model_path = "models/cloudops-llm-adapter"
                 if not os.path.exists(model_path):
                     print("[API] Local adapter not found. Using fallback mock.")
-                    return 0.8 if len(prompt) > 50 else 0.2
+                    return 0 if len(prompt) < 50 else 2
             else:
                 model_path = model_info.get("source")
                 if model_path.startswith("file:///"):
@@ -49,41 +49,38 @@ class RouterPredictor:
             # pyrefly: ignore [missing-import]
             import torch
             # pyrefly: ignore [missing-import]
-            from transformers import AutoModelForCausalLM, AutoTokenizer
-            print(f"[API] Loading router model from {model_path}...")
-            cls._tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-            if cls._tokenizer.pad_token is None:
-                cls._tokenizer.pad_token = cls._tokenizer.eos_token
+            from transformers import AutoModelForSequenceClassification, AutoTokenizer
+            print(f"[API] Loading sequence classification router model from {model_path}...")
+            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
                 
-            cls._model = AutoModelForCausalLM.from_pretrained(
+            model = AutoModelForSequenceClassification.from_pretrained(
                 model_path,
+                num_labels=3,
                 device_map="auto",
                 trust_remote_code=True,
                 torch_dtype=torch.float16,
             )
+            if model.config.pad_token_id is None:
+                model.config.pad_token_id = tokenizer.pad_token_id
+            
+            cls._tokenizer = tokenizer
+            cls._model = model
             cls._model.eval()
             cls._is_loaded = True
 
-        input_text = f"### Instruction:\n{prompt}\n\n### Score:\n"
-        inputs = cls._tokenizer(input_text, return_tensors="pt").to(cls._model.device)
+        input_text = prompt
+        inputs = cls._tokenizer(input_text, return_tensors="pt", padding=True, truncation=True, max_length=512).to(cls._model.device)
         
         # pyrefly: ignore [missing-import]
         import torch
         with torch.no_grad():
-            outputs = cls._model.generate(
-                **inputs,
-                max_new_tokens=10,
-                pad_token_id=cls._tokenizer.eos_token_id,
-                temperature=0.1,
-                do_sample=False,
-            )
-        generated_text = cls._tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
-        try:
-            words = generated_text.strip().split()
-            score = float(words[0]) if words else 0.5
-            return max(0.0, min(1.0, score))
-        except Exception:
-            return 0.5
+            outputs = cls._model(**inputs)
+            logits = outputs.logits
+            pred_class = torch.argmax(logits, dim=-1).item()
+            
+        return pred_class
 
 
 
@@ -157,15 +154,16 @@ async def chat_endpoint(request: ChatRequest):
 
     # 2. Difficulty-Aware Routing
     try:
-        # Use real Router model (or fallback if Day 0)
-        difficulty_score = await asyncio.to_thread(RouterPredictor.predict, request.prompt)
+        # Use real Router model (classification 0, 1, 2)
+        predicted_class = await asyncio.to_thread(RouterPredictor.predict, request.prompt)
+        difficulty_score = float(predicted_class) / 2.0  # map 0->0.0, 1->0.5, 2->1.0 for logs
 
-        if difficulty_score < 0.4:
+        if predicted_class == 0:
             model_path = "Weak Model (vLLM Qwen 0.5B)"
             route = "weak"
             model_used = "Qwen/Qwen2.5-0.5B-Instruct"
             response_text = await call_openai_compatible_api("http://localhost:8001/v1/chat/completions", model_used, request.prompt)
-        elif difficulty_score < 0.7:
+        elif predicted_class == 1:
             model_path = "Strong Model (SGLang Qwen 0.5B)"
             route = "strong_disaggregated"
             model_used = "Qwen/Qwen2.5-0.5B-Instruct"
