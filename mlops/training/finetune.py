@@ -171,7 +171,7 @@ class QLoRATrainer:
             "lora_alpha": lora_config.get("alpha", 32),
             "lora_dropout": lora_config.get("dropout", 0.05),
             "target_modules": lora_config.get("target_modules", ["q_proj", "v_proj"]),
-            "task_type": "CAUSAL_LM",
+            "task_type": "SEQ_CLS",
             "training_completed": datetime.now(timezone.utc).isoformat(),
             "mock_training": True,
         }
@@ -221,31 +221,43 @@ class QLoRATrainer:
         import torch
         # pyrefly: ignore [missing-import]
         from transformers import (
-            AutoModelForCausalLM,
+            AutoModelForSequenceClassification,
             AutoTokenizer,
             BitsAndBytesConfig,
+            Trainer,
+            TrainingArguments,
+            DataCollatorWithPadding,
         )
         # pyrefly: ignore [missing-import]
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-        # pyrefly: ignore [missing-import]
-        from trl import SFTTrainer, SFTConfig
         # pyrefly: ignore [missing-import]
         from datasets import Dataset
 
         model_config = self.config.get("model", {})
         lora_config_dict = self.config.get("lora", {})
         train_config = self.config.get("training", {})
+        dataset_config = self.config.get("dataset", {})
 
-        model_name = model_config.get("base_model", "meta-llama/Llama-3-8B")
+        model_name = model_config.get("base_model", "Qwen/Qwen2.5-0.5B")
+        num_labels = model_config.get("num_labels", 3)
+        max_seq_length = train_config.get("max_seq_length", 512)
         
         print(f"\nLoading base model: {model_name}")
+
+        # Log GPU info
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            gpu_mem = torch.cuda.get_device_properties(0).total_mem / 1024**3
+            print(f"GPU: {gpu_name} ({gpu_mem:.1f} GB)")
+            print(f"VRAM before loading: {torch.cuda.memory_allocated(0) / 1024**3:.2f} GB")
 
         is_gpt2 = "gpt2" in model_name.lower()
 
         if is_gpt2:
             print("Using GPT-2: Disabling 4-bit quantization for compatibility.")
-            model = AutoModelForCausalLM.from_pretrained(
+            model = AutoModelForSequenceClassification.from_pretrained(
                 model_name,
+                num_labels=num_labels,
                 trust_remote_code=True,
                 torch_dtype=torch.float16,
             )
@@ -259,8 +271,9 @@ class QLoRATrainer:
             )
 
             # Load model
-            model = AutoModelForCausalLM.from_pretrained(
+            model = AutoModelForSequenceClassification.from_pretrained(
                 model_name,
+                num_labels=num_labels,
                 quantization_config=bnb_config,
                 device_map="auto",
                 trust_remote_code=True,
@@ -269,6 +282,9 @@ class QLoRATrainer:
 
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         tokenizer.pad_token = tokenizer.eos_token
+        
+        if model.config.pad_token_id is None:
+            model.config.pad_token_id = tokenizer.pad_token_id
 
         # Prepare model for k-bit training
         if not is_gpt2:
@@ -283,26 +299,58 @@ class QLoRATrainer:
                 "target_modules", ["q_proj", "k_proj", "v_proj", "o_proj"]
             ),
             bias="none",
-            task_type="CAUSAL_LM",
+            task_type="SEQ_CLS",
         )
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
 
+        if torch.cuda.is_available():
+            print(f"VRAM after model load: {torch.cuda.memory_allocated(0) / 1024**3:.2f} GB")
+            print(f"VRAM peak after load:  {torch.cuda.max_memory_allocated(0) / 1024**3:.2f} GB")
+
         # Load and format dataset
-        records = []
-        with open(dataset_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    r = json.loads(line)
-                    # Format as instruction-following
-                    text = (
-                        f"### Instruction:\n{r.get('prompt', '')}\n\n"
-                        f"### Score:\n{r.get('difficulty_score', '')}"
-                    )
-                    records.append({"text": text})
+        def _load_jsonl_records(path):
+            records = []
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        r = json.loads(line)
+                        prompt = r.get("prompt", r.get("instruction", ""))
+                        # Support both new pipeline (routing_label) and old pipeline (ground_truth_label)
+                        if "routing_label" in r:
+                            label = r["routing_label"]
+                        elif "ground_truth_label" in r:
+                            label = r["ground_truth_label"]
+                        else:
+                            score = r.get("difficulty_score", 0.5)
+                            label = 0 if score < 0.4 else (1 if score < 0.7 else 2)
+                        records.append({"text": prompt, "label": label})
+            return records
         
-        dataset = Dataset.from_list(records)
+        train_records = _load_jsonl_records(dataset_path)
+        train_dataset = Dataset.from_list(train_records)
+        
+        # Load validation dataset if available
+        eval_dataset = None
+        val_path = dataset_config.get("val_path", "data/splits/val.jsonl")
+        if Path(val_path).exists():
+            val_records = _load_jsonl_records(val_path)
+            eval_dataset = Dataset.from_list(val_records)
+            print(f"Loaded validation set: {len(val_records)} samples")
+        
+        def preprocess_function(examples):
+            inputs = tokenizer(examples["text"], padding="max_length", truncation=True, max_length=max_seq_length)
+            inputs["labels"] = examples["label"]
+            return inputs
+            
+        train_dataset = train_dataset.map(preprocess_function, batched=True, remove_columns=["text", "label"])
+        if eval_dataset is not None:
+            eval_dataset = eval_dataset.map(preprocess_function, batched=True, remove_columns=["text", "label"])
+
+        print(f"Training samples: {len(train_dataset)}")
+        if eval_dataset:
+            print(f"Validation samples: {len(eval_dataset)}")
 
         # DeepSpeed config path
         deepspeed_config = None
@@ -311,22 +359,26 @@ class QLoRATrainer:
             deepspeed_config = str(ds_path)
 
         # Training arguments
-        training_args = SFTConfig(
+        training_args = TrainingArguments(
             output_dir=output_dir,
             num_train_epochs=train_config.get("num_epochs", 3),
-            per_device_train_batch_size=train_config.get("per_device_train_batch_size", 4),
-            gradient_accumulation_steps=train_config.get("gradient_accumulation_steps", 4),
+            per_device_train_batch_size=train_config.get("per_device_train_batch_size", 2),
+            per_device_eval_batch_size=train_config.get("per_device_eval_batch_size", 4),
+            gradient_accumulation_steps=train_config.get("gradient_accumulation_steps", 8),
             learning_rate=train_config.get("learning_rate", 2e-4),
             weight_decay=train_config.get("weight_decay", 0.01),
-            warmup_steps=0,
+            warmup_ratio=train_config.get("warmup_ratio", 0.1),
             lr_scheduler_type=train_config.get("lr_scheduler_type", "cosine"),
             logging_steps=train_config.get("logging_steps", 10),
+            eval_strategy="epoch" if eval_dataset else "no",
             save_strategy="epoch",
-            bf16=True,
-            fp16=False,
+            load_best_model_at_end=True if eval_dataset else False,
+            metric_for_best_model="eval_f1_macro" if eval_dataset else None,
+            greater_is_better=True if eval_dataset else None,
+            bf16=train_config.get("bf16", True),
+            fp16=train_config.get("fp16", False),
             deepspeed=deepspeed_config,
             report_to="none",  # We handle MLflow logging separately
-            max_length=train_config.get("max_seq_length", 2048),
         )
 
         # Trainer callback for UI streaming
@@ -337,12 +389,33 @@ class QLoRATrainer:
                     loss = logs.get("loss")
                     callback("TRAIN", f"Step {state.global_step}/{state.max_steps}: Loss = {loss:.4f}")
 
+        data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
+
+        # Compute metrics function for evaluation
+        import numpy as np
+        from sklearn.metrics import accuracy_score, f1_score
+        
+        def compute_metrics(eval_pred):
+            logits, labels = eval_pred
+            predictions = np.argmax(logits, axis=-1)
+            acc = accuracy_score(labels, predictions)
+            f1_macro = f1_score(labels, predictions, average="macro", zero_division=0)
+            f1_weighted = f1_score(labels, predictions, average="weighted", zero_division=0)
+            return {
+                "accuracy": round(acc, 4),
+                "f1_macro": round(f1_macro, 4),
+                "f1_weighted": round(f1_weighted, 4),
+            }
+
         # Initialize trainer
-        trainer = SFTTrainer(
+        trainer = Trainer(
             model=model,
             args=training_args,
-            train_dataset=dataset,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
             processing_class=tokenizer,
+            data_collator=data_collator,
+            compute_metrics=compute_metrics if eval_dataset else None,
             callbacks=[UILogCallback()] if callback else None,
         )
 
@@ -350,6 +423,21 @@ class QLoRATrainer:
         start_time = time.time()
         train_result = trainer.train()
         elapsed = time.time() - start_time
+
+        # Resource monitoring
+        resource_info = {
+            "training_time_s": round(elapsed, 2),
+            "samples_per_sec": round(len(train_dataset) * train_config.get("num_epochs", 3) / elapsed, 2) if elapsed > 0 else 0,
+        }
+        if torch.cuda.is_available():
+            resource_info["peak_vram_gb"] = round(torch.cuda.max_memory_allocated(0) / 1024**3, 2)
+            resource_info["current_vram_gb"] = round(torch.cuda.memory_allocated(0) / 1024**3, 2)
+        
+        try:
+            import psutil
+            resource_info["cpu_ram_gb"] = round(psutil.Process().memory_info().rss / 1024**3, 2)
+        except ImportError:
+            pass
 
         # Save adapter weights
         model.save_pretrained(output_dir)
@@ -363,7 +451,7 @@ class QLoRATrainer:
             "final_loss": round(train_result.training_loss, 4),
             "total_epochs": train_config.get("num_epochs", 3),
             "total_steps": train_result.global_step,
-            "dataset_samples": len(dataset),
+            "dataset_samples": len(train_dataset),
             "training_time_s": round(elapsed, 2),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "metrics": {
@@ -373,6 +461,7 @@ class QLoRATrainer:
                     p.numel() for p in model.parameters() if p.requires_grad
                 ),
             },
+            "resource": resource_info,
         }
 
         return result

@@ -1,0 +1,95 @@
+# =============================================================
+# Evaluation Configuration for LLM Router
+# =============================================================
+
+# Metrics to compute
+metrics:
+  classification:
+    - accuracy
+    - macro_f1
+    - weighted_f1
+    - per_class_f1
+    - precision_macro
+    - recall_macro
+    - confusion_matrix
+
+  routing:
+    - cost_savings_ratio
+    - unnecessary_strong_calls
+    - weak_failure_rate
+    - routing_regret
+
+# Cost model for routing analysis
+cost_model:
+  weak:
+    cost_per_token: 0.0001       # Relative cost units
+    avg_latency_ms: 100
+  medium:
+    cost_per_token: 0.001
+    avg_latency_ms: 300
+  strong:
+    cost_per_token: 0.01
+    avg_latency_ms: 1000
+
+# Baselines
+baselines:
+  random:
+    enabled: true
+    description: "Random uniform routing"
+
+  length_heuristic:
+    enabled: true
+    description: "Query length-based routing"
+    thresholds:
+      short: 50                  # chars → weak
+      medium: 150                # chars → medium
+      # > medium → strong
+
+  keyword_heuristic:
+    enabled: true
+    description: "Keyword-based routing"
+    strong_keywords:
+      - "explain step by step"
+      - "analyze"
+      - "compare"
+      - "write code"
+      - "prove"
+      - "derive"
+      - "evaluate"
+    weak_keywords:
+      - "what is"
+      - "define"
+      - "list"
+      - "hello"
+      - "translate"
+
+# Experiment design
+experiments:
+  # Hypothesis: Label quality > data quantity
+  quality_vs_quantity:
+    enabled: true
+    experiments:
+      - name: "mock_5000"
+        label_method: "mock_length"
+        n_samples: 5000
+      - name: "quality_1000"
+        label_method: "ultrafeedback_score"
+        n_samples: 1000
+      - name: "quality_3000"
+        label_method: "ultrafeedback_score"
+        n_samples: 3000
+      - name: "quality_5000"
+        label_method: "ultrafeedback_score"
+        n_samples: 5000
+
+  # Dataset size scaling
+  scaling:
+    enabled: true
+    sizes: [500, 1000, 3000, 5000]
+
+# Report output
+reports:
+  output_dir: "reports"
+  dataset_quality_dir: "reports/dataset_quality"
+  experiments_dir: "reports/experiments"
+  evaluation_dir: "reports/evaluation"

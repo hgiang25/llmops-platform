@@ -1,0 +1,117 @@
+# =============================================================
+# Dataset Configuration for LLM Router
+# =============================================================
+# Controls dataset source, label construction, and sampling.
+
+# --- Dataset Sources ---
+sources:
+  ultrafeedback:
+    name: "openbmb/UltraFeedback"
+    enabled: true
+    streaming: false          # UltraFeedback is ~600MB, fits in RAM
+    description: "GPT-4 annotated multi-model completions (64K prompts)"
+
+  chatbot_arena:
+    name: "lmsys/lmsys-arena-human-preference-55k"
+    enabled: false            # Enable when HuggingFace access is granted
+    streaming: false
+    description: "Human preference pairwise battles (55K battles)"
+
+# --- Model Tier Classification ---
+# UltraFeedback contains responses from 17 models.
+# We cluster them into 3 tiers based on known capability.
+model_tiers:
+  weak:
+    - "alpaca-7b"
+    - "wizardlm-7b"
+    - "pythia-12b"
+    - "oasst-pythia-12b"
+    - "dolly-v2-12b"
+    - "falcon-40b-instruct"
+    - "starchat"
+  medium:
+    - "vicuna-33b-v1.3"
+    - "llama-2-7b-chat"
+    - "llama-2-13b-chat"
+    - "llama-2-70b-chat"
+    - "wizardlm-13b"
+    - "wizardlm-70b"
+    - "ultralm-13b"
+    - "ultralm-65b"
+  strong:
+    - "gpt-4"
+    - "gpt-3.5-turbo"
+    - "bard"
+
+# --- Label Construction ---
+labeling:
+  # Method: "ultrafeedback_score" | "chatbot_arena_pairwise" | "mock_length"
+  method: "ultrafeedback_score"
+
+  # Quality threshold: if a weak model scores >= this, the query is "easy"
+  # UltraFeedback scores range 1-10
+  quality_threshold: 7.0
+
+  # Score field to use from UltraFeedback annotations
+  score_field: "overall_score"
+
+  # How to handle ties / ambiguous cases
+  tie_breaking: "favor_weak"  # "favor_weak" | "favor_strong"
+
+  # Label names and their integer mapping
+  label_map:
+    weak: 0
+    medium: 1
+    strong: 2
+
+  # For mock baseline labels (used in experiments only)
+  mock:
+    short_threshold: 50       # chars
+    medium_threshold: 150     # chars
+
+# --- Data Paths ---
+paths:
+  raw_dir: "data/raw"
+  interim_dir: "data/interim"
+  processed_dir: "data/processed"
+  labeled_dir: "data/labeled"
+  splits_dir: "data/splits"
+  metadata_dir: "data/metadata"
+
+# --- Cleaning ---
+cleaning:
+  min_prompt_length: 10        # chars
+  max_prompt_length: 4096      # chars
+  min_prompt_words: 3
+  remove_empty: true
+  remove_non_english: false    # Keep all languages for now
+  normalize_whitespace: true
+
+# --- Deduplication ---
+deduplication:
+  exact_match: true
+  near_duplicate: true
+  near_duplicate_threshold: 0.85  # Jaccard similarity threshold
+
+# --- Sampling ---
+sampling:
+  max_samples: 5000           # Total samples after sampling
+  strategy: "stratified"      # "stratified" | "random" | "balanced"
+  random_seed: 42
+
+  # For balanced sampling
+  balancing:
+    method: "undersample"     # "undersample" | "oversample" | "class_weights"
+
+# --- Train/Val/Test Split ---
+split:
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+  random_seed: 42
+  stratify: true              # Stratified split by label
+
+# --- Dataset Versioning ---
+versioning:
+  current_version: "v1.0"
+  description: "Initial dataset from UltraFeedback with GPT-4 derived routing labels"

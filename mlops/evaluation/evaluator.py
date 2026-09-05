@@ -41,42 +41,38 @@ class ModelEvaluator:
 
     def __init__(
         self,
-        t_low: float = 0.4,
-        t_high: float = 0.7,
         report_output_dir: str = "data/reports",
     ):
-        self.t_low = t_low
-        self.t_high = t_high
         self.report_output_dir = Path(report_output_dir)
         self.report_output_dir.mkdir(parents=True, exist_ok=True)
 
-    def _score_to_route(self, score: float) -> str:
-        """Convert a difficulty score into a routing decision."""
-        if score < self.t_low:
+    def _label_to_route(self, label: int) -> str:
+        """Convert a class label into a routing decision."""
+        if label == 0:
             return "weak"
-        elif score < self.t_high:
+        elif label == 1:
             return "strong_disaggregated"
         else:
             return "strong_external"
 
-    def _score_to_binary(self, score: float) -> int:
-        """Convert difficulty score to binary: 0=weak, 1=strong."""
-        return 0 if score < self.t_low else 1
+    def _label_to_binary(self, label: int) -> int:
+        """Convert label to binary: 0=weak, 1=strong."""
+        return 0 if label == 0 else 1
 
     def evaluate(
         self,
         test_data: list[dict],
-        predicted_scores: Optional[list[float]] = None,
+        predicted_classes: Optional[list[int]] = None,
         model_name: str = "router_model",
     ) -> dict:
         """
         Evaluate router model predictions against ground truth.
 
         Args:
-            test_data: List of records with 'difficulty_score' (ground truth)
+            test_data: List of records with 'ground_truth_label' or 'difficulty_score'
                        and 'domain' fields.
-            predicted_scores: Model's predicted difficulty scores.
-                              If None, uses a simulated predictor.
+            predicted_classes: Model's predicted class labels (0, 1, 2).
+                               If None, uses a simulated predictor.
             model_name: Name of the model being evaluated.
 
         Returns:
@@ -86,16 +82,26 @@ class ModelEvaluator:
             return {"error": "No test data provided."}
 
         # Ground truth routing decisions
-        true_scores = [r["difficulty_score"] for r in test_data]
-        true_routes = [self._score_to_route(s) for s in true_scores]
-        true_binary = [self._score_to_binary(s) for s in true_scores]
+        true_labels = []
+        for r in test_data:
+            if "routing_label" in r:
+                true_labels.append(r["routing_label"])
+            elif "ground_truth_label" in r:
+                true_labels.append(r["ground_truth_label"])
+            else:
+                score = r.get("difficulty_score", 0.5)
+                label = 0 if score < 0.4 else (1 if score < 0.7 else 2)
+                true_labels.append(label)
+                
+        true_routes = [self._label_to_route(l) for l in true_labels]
+        true_binary = [self._label_to_binary(l) for l in true_labels]
 
         # Predicted routing decisions
-        if predicted_scores is None:
-            return {"error": "predicted_scores must be provided (run predict_scores first)."}
+        if predicted_classes is None:
+            return {"error": "predicted_classes must be provided (run predict_classes first)."}
 
-        pred_routes = [self._score_to_route(s) for s in predicted_scores]
-        pred_binary = [self._score_to_binary(s) for s in predicted_scores]
+        pred_routes = [self._label_to_route(l) for l in predicted_classes]
+        pred_binary = [self._label_to_binary(l) for l in predicted_classes]
 
         # --- Compute metrics ---
 
@@ -111,6 +117,23 @@ class ModelEvaluator:
         f1 = f1_score(
             true_routes, pred_routes, labels=all_labels, average="weighted", zero_division=0
         )
+
+        # Macro F1 (equally weights all classes — important for imbalanced data)
+        f1_macro = f1_score(
+            true_routes, pred_routes, labels=all_labels, average="macro", zero_division=0
+        )
+        precision_macro = precision_score(
+            true_routes, pred_routes, labels=all_labels, average="macro", zero_division=0
+        )
+        recall_macro = recall_score(
+            true_routes, pred_routes, labels=all_labels, average="macro", zero_division=0
+        )
+
+        # Per-class F1
+        per_class_f1 = f1_score(
+            true_routes, pred_routes, labels=all_labels, average=None, zero_division=0
+        )
+        per_class_f1_dict = {label: round(float(score), 4) for label, score in zip(all_labels, per_class_f1)}
 
         # Binary metrics (weak vs strong)
         binary_accuracy = accuracy_score(true_binary, pred_binary)
@@ -141,22 +164,21 @@ class ModelEvaluator:
             true_routes, pred_routes, labels=all_labels, output_dict=True, zero_division=0
         )
 
-        # Score distribution stats
-        score_errors = [
-            abs(t - p) for t, p in zip(true_scores, predicted_scores)
-        ]
-        mae = np.mean(score_errors)
-
         report = {
             "model_name": model_name,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "n_samples": len(test_data),
-            "thresholds": {"t_low": self.t_low, "t_high": self.t_high},
-            # Multi-class routing metrics
+            # Multi-class routing metrics (weighted)
             "routing_accuracy": round(accuracy, 4),
             "routing_precision": round(precision, 4),
             "routing_recall": round(recall, 4),
             "routing_f1": round(f1, 4),
+            # Multi-class routing metrics (macro — equal class weight)
+            "routing_f1_macro": round(f1_macro, 4),
+            "routing_precision_macro": round(precision_macro, 4),
+            "routing_recall_macro": round(recall_macro, 4),
+            # Per-class F1
+            "per_class_f1": per_class_f1_dict,
             # Binary (weak vs strong) metrics
             "binary_accuracy": round(binary_accuracy, 4),
             "binary_f1": round(binary_f1, 4),
@@ -164,8 +186,6 @@ class ModelEvaluator:
             "cost_savings_ratio": round(cost_savings_ratio, 4),
             "misrouting_rate": round(misrouting_rate, 4),
             "misrouted_hard_queries": misrouted_hard,
-            # Score prediction quality
-            "score_mae": round(float(mae), 4),
             # Confusion matrix
             "confusion_matrix": {
                 "labels": all_labels,
@@ -235,14 +255,14 @@ class ModelEvaluator:
             ),
         }
 
-    def predict_scores(self, model_path: str, test_data: list[dict]) -> list[float]:
+    def predict_classes(self, model_path: str, test_data: list[dict]) -> list[int]:
         """
-        Run actual inference using the fine-tuned model to predict difficulty scores.
+        Run actual inference using the fine-tuned Sequence Classification model.
         """
         # pyrefly: ignore [missing-import]
         import torch
         # pyrefly: ignore [missing-import]
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
         
         print(f"[EVAL] Loading model for inference from {model_path}...")
         
@@ -256,51 +276,34 @@ class ModelEvaluator:
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
             
-        model = AutoModelForCausalLM.from_pretrained(
+        model = AutoModelForSequenceClassification.from_pretrained(
             model_path,
+            num_labels=3,
             device_map="auto",
             trust_remote_code=True,
             torch_dtype=torch.float16,
         )
+        if model.config.pad_token_id is None:
+            model.config.pad_token_id = tokenizer.pad_token_id
         model.eval()
 
-        predicted_scores = []
+        predicted_classes = []
         print(f"[EVAL] Running inference on {len(test_data)} samples...")
         
         for r in test_data:
             prompt = r.get("prompt", "")
-            input_text = (
-                f"### Instruction:\n{prompt}\n\n"
-                f"### Score:\n"
-            )
-            inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
+            input_text = prompt
+            
+            inputs = tokenizer(input_text, return_tensors="pt", padding=True, truncation=True, max_length=512).to(model.device)
             
             with torch.no_grad():
-                outputs = model.generate(
-                    **inputs,
-                    max_new_tokens=10,
-                    pad_token_id=tokenizer.eos_token_id,
-                    temperature=0.1,
-                    do_sample=False,
-                )
-            
-            generated_text = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
-            
-            # Extract score from generated text
-            try:
-                # The score should be the first float in the generated text
-                words = generated_text.strip().split()
-                if not words:
-                    score = 0.5
-                else:
-                    score = float(words[0])
-                score = max(0.0, min(1.0, score))
-            except Exception:
-                score = 0.5  # default on parsing failure
+                outputs = model(**inputs)
+                logits = outputs.logits
+                pred_class = torch.argmax(logits, dim=-1).item()
                 
-            predicted_scores.append(score)
+            predicted_classes.append(pred_class)
             
-        return predicted_scores
+        return predicted_classes
 
 
     def _save_report(self, report: dict):
@@ -332,5 +335,5 @@ if __name__ == "__main__":
     print(f"  Binary Accuracy:    {report['binary_accuracy']}")
     print(f"  Cost Savings Ratio: {report['cost_savings_ratio']}")
     print(f"  Misrouting Rate:    {report['misrouting_rate']}")
-    print(f"  Score MAE:          {report['score_mae']}")
+    print(f"  Misrouting Rate:    {report['misrouting_rate']}")
     print("=" * 60)
