@@ -73,7 +73,7 @@ services:
       "
 
   mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.5.0
+    image: ghcr.io/mlflow/mlflow:v2.20.1
     container_name: llmops_mlflow
     restart: always
     ports:
