@@ -53,7 +53,10 @@ class ModelRegistry:
         # Ensure default experiment exists
         experiment = mlflow.get_experiment_by_name(self.default_experiment)
         if experiment is None:
-            mlflow.create_experiment(self.default_experiment)
+            mlflow.create_experiment(
+                self.default_experiment,
+                artifact_location=f"s3://mlflow-artifacts/{self.default_experiment}"
+            )
 
     def register_model(
         self,
