@@ -112,6 +112,11 @@ class ModelRegistry:
             model_dir = Path(model_path)
             if model_dir.exists():
                 if model_dir.is_dir():
+                    # Create dummy MLmodel file so Model Registry accepts it
+                    mlmodel_path = model_dir / "MLmodel"
+                    if not mlmodel_path.exists():
+                        with open(mlmodel_path, "w", encoding="utf-8") as f:
+                            f.write("artifact_path: model\nflavors:\n  python_function:\n    env: conda.yaml\n    loader_module: mlflow.pyfunc.model\n    python_version: 3.10.12\n")
                     mlflow.log_artifacts(str(model_dir), artifact_path="model")
                 else:
                     mlflow.log_artifact(str(model_dir), artifact_path="model")
