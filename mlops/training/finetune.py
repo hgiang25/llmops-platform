@@ -247,7 +247,7 @@ class QLoRATrainer:
         # Log GPU info
         if torch.cuda.is_available():
             gpu_name = torch.cuda.get_device_name(0)
-            gpu_mem = torch.cuda.get_device_properties(0).total_mem / 1024**3
+            gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
             print(f"GPU: {gpu_name} ({gpu_mem:.1f} GB)")
             print(f"VRAM before loading: {torch.cuda.memory_allocated(0) / 1024**3:.2f} GB")
 
@@ -368,7 +368,7 @@ class QLoRATrainer:
             learning_rate=train_config.get("learning_rate", 2e-4),
             weight_decay=train_config.get("weight_decay", 0.01),
             # pyrefly: ignore [unexpected-keyword]
-            warmup_ratio=train_config.get("warmup_ratio", 0.1),
+            warmup_steps=train_config.get("warmup_steps", 100),
             lr_scheduler_type=train_config.get("lr_scheduler_type", "cosine"),
             logging_steps=train_config.get("logging_steps", 10),
             eval_strategy="epoch" if eval_dataset else "no",
