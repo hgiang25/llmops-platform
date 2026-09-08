@@ -1,0 +1,91 @@
+# =============================================================
+# Monitoring & Scoring Configuration for LLM Router
+# =============================================================
+# Controls batch scoring, drift detection, quality monitoring,
+# and retrain trigger thresholds.
+
+# --- Embedding Model ---
+embedding:
+  model_name: "intfloat/multilingual-e5-small"   # 47M params, 384-dim, multilingual
+  device: "cpu"                                    # "cpu" | "cuda"
+  batch_size: 64
+  max_seq_length: 512
+
+# --- Semantic KNN ---
+knn:
+  k: 5                             # Number of nearest neighbors
+  distance_metric: "cosine"        # "cosine" | "l2"
+  confidence_threshold: 0.65       # Below this → routing_assessment = "unknown"
+  distance_threshold: 0.5          # Max acceptable mean distance to neighbors
+  epsilon: 1e-6                    # Smoothing for weight = 1 / (distance + epsilon)
+
+# --- User Feedback Scoring ---
+# Feedback is a weak supervision signal, NOT absolute ground truth.
+# These weights control how feedback adjusts the base KNN score.
+feedback:
+  thumbs_up_boost: 1.5             # Score floor when positive feedback
+  thumbs_down_cap: 2.5             # Score ceiling when negative feedback
+  regenerate_cap: 2.0              # Score ceiling when negative + regenerate
+  absent_adjustment: 0.0           # No adjustment when feedback is missing
+  # NOTE: missing_feedback ≠ positive_feedback (feedback bias principle)
+
+# --- Quality Monitoring ---
+quality:
+  score_scale_min: 1               # Minimum quality score
+  score_scale_max: 5               # Maximum quality score
+  drop_threshold_absolute: 0.5     # Min mean score drop to consider significant
+  drop_threshold_pvalue: 0.05      # Statistical significance level (one-sided t-test)
+  minimum_samples: 50              # Min current samples before triggering quality alert
+  # Expected quality per routing label (for KNN base score mapping)
+  knn_quality_mapping:
+    weak: 4.0                      # Weak model handling easy query → expect good quality
+    medium: 4.2
+    strong: 4.5
+
+# --- Drift Detection Thresholds ---
+drift:
+  data:
+    # Population Stability Index threshold
+    # PSI < 0.1 = no shift, 0.1-0.2 = moderate, > 0.2 = significant
+    # Reference: Yurdakul (2003), credit scoring literature
+    psi_threshold: 0.2
+    # Kolmogorov-Smirnov test p-value threshold
+    ks_pvalue_threshold: 0.05
+    # KL Divergence threshold (empirically chosen, no universal standard)
+    kl_threshold: 0.1
+    # Ensemble voting: drift if >= 2 of 3 tests agree
+    voting: "2_of_3"
+  routing:
+    # L1 divergence between reference and current routing distributions
+    distribution_divergence_threshold: 0.2
+  quality:
+    # Alert if negative feedback rate exceeds this (over feedback-bearing queries)
+    negative_feedback_rate_threshold: 0.15
+    # Alert if potential routing failure rate exceeds this
+    routing_failure_rate_threshold: 0.10
+    # Warning if too many queries have uncertain assessment
+    uncertain_rate_warning: 0.30
+
+# --- Retrain Trigger ---
+# Retrain is NOT triggered by data drift or routing drift alone.
+# Requires quality degradation evidence.
+retrain:
+  require_quality_drop: true        # Must detect quality drop
+  require_routing_failure: true     # Must have routing failure evidence
+  require_minimum_samples: true     # Must have enough samples
+  minimum_samples: 100              # Minimum scored samples for retrain decision
+
+# --- Batch Scorer ---
+batch:
+  idempotency: "skip"              # "skip" = skip already-scored records, "update" = re-score
+  output_dir: "data/scored"
+  report_dir: "data/monitoring/quality_reports"
+
+# --- Reference Data ---
+reference:
+  base_dir: "data/reference"
+  current_version: "v1"
+
+# --- Artifacts (Embedding Index) ---
+artifacts:
+  embeddings_dir: "artifacts/embeddings"
