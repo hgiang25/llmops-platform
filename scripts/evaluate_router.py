@@ -35,7 +35,7 @@ def load_test_data(test_path: str = "data/splits/test.jsonl") -> list[dict]:
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate LLM Router")
-    parser.add_argument("--model_path", type=str, default="models/cloudops-llm-adapter",
+    parser.add_argument("--model_path", type=str, default="models/deberta-router",
                         help="Path to trained model/adapter")
     parser.add_argument("--test_path", type=str, default="data/splits/test.jsonl",
                         help="Path to test data")
@@ -60,11 +60,13 @@ def main():
     evaluator = ModelEvaluator()
     all_results = {}
     
-    # --- Baselines ---
-    print("\n" + "=" * 60)
+    print(f"\n{'=' * 60}")
     print("  BASELINE EVALUATION")
-    print("=" * 60)
+    print(f"{'=' * 60}")
     
+    # Run heuristic baselines
+    # Note: TF-IDF and SBERT require train_data to fit, which we omit here for simplicity
+    # but the framework is ready if train_data is passed.
     baseline_results = run_all_baselines(test_data)
     
     for baseline_name, baseline_data in baseline_results.items():
@@ -104,8 +106,22 @@ def main():
             print(f"  FINE-TUNED MODEL EVALUATION: {model_path}")
             print(f"{'=' * 60}")
             
+            # Check architecture
+            is_ordinal = False
+            config_path = Path(model_path) / "model_config.json"
+            if config_path.exists():
+                with open(config_path, "r") as f:
+                    cfg = json.load(f)
+                    if cfg.get("architecture") == "ordinal_classification":
+                        is_ordinal = True
+            
             # Run inference
-            predicted_classes = evaluator.predict_classes(model_path, test_data)
+            if is_ordinal:
+                print("[EVAL] Running DeBERTa Ordinal inference...")
+                predicted_classes = evaluator.predict_ordinal(model_path, test_data)
+            else:
+                print("[EVAL] Running Standard Classification inference...")
+                predicted_classes = evaluator.predict_classes(model_path, test_data)
             
             # Classification metrics
             model_report = evaluator.evaluate(

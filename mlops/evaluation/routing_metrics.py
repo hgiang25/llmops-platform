@@ -108,6 +108,39 @@ def compute_routing_metrics(
         correct = sum(1 for i in mask if pred_labels[i] == label)
         per_class_correct[label] = round(correct / len(mask), 4) if mask else 0
     
+    # 8. Ordinal MAE (Mean Absolute Error)
+    # For ordinal data, MAE captures that predicting 0 when truth is 2
+    # is worse (error=2) than predicting 1 when truth is 2 (error=1)
+    ordinal_mae = sum(abs(t - p) for t, p in zip(true_labels, pred_labels)) / n
+    
+    # 9. Severity-weighted error
+    # Under-routing by 2 levels (0→2) is much worse than by 1 level (0→1)
+    # Weight: (true - pred)^2 for under-routing, (pred - true) for over-routing
+    severity_errors = []
+    for t, p in zip(true_labels, pred_labels):
+        if p < t:  # Under-routing (dangerous)
+            severity_errors.append((t - p) ** 2)
+        elif p > t:  # Over-routing (wasteful but safe)
+            severity_errors.append(t - p)  # negative
+        else:
+            severity_errors.append(0)
+    severity_weighted_error = sum(max(0, e) for e in severity_errors) / n
+    
+    # 10. Quality-Cost Utility
+    # Utility = Quality - λ×Cost
+    # Quality: 1.0 if correct or over-routed, penalty for under-routing
+    lambda_cost = 0.5  # Cost weight
+    quality_scores = []
+    for t, p in zip(true_labels, pred_labels):
+        if p >= t:
+            quality_scores.append(1.0)  # Correct or over-routed → full quality
+        else:
+            quality_scores.append(max(0, 1.0 - (t - p) * 0.3))  # Penalty per level
+    
+    avg_quality = sum(quality_scores) / n
+    normalized_cost = router_cost / always_strong_cost if always_strong_cost > 0 else 1.0
+    utility = avg_quality - lambda_cost * normalized_cost
+    
     metrics = {
         "n_samples": n,
         # Cost
@@ -122,6 +155,13 @@ def compute_routing_metrics(
         "weak_failure_rate": round(weak_failure_rate, 4),
         "under_routing_rate": round(under_routing_rate, 4),
         "over_routing_rate": round(over_routing_rate, 4),
+        # Ordinal
+        "ordinal_mae": round(ordinal_mae, 4),
+        "severity_weighted_error": round(severity_weighted_error, 4),
+        # Utility
+        "quality_cost_utility": round(utility, 4),
+        "avg_quality": round(avg_quality, 4),
+        "normalized_cost": round(normalized_cost, 4),
         # Latency
         "latency_savings_vs_always_strong": round(latency_savings_vs_strong, 4),
         "router_avg_latency_ms": round(router_latency / n, 2),
@@ -155,6 +195,15 @@ def print_routing_report(metrics: dict):
     print(f"  Under-routing rate:      {metrics['under_routing_rate'] * 100:.1f}%")
     print(f"  Over-routing rate:       {metrics['over_routing_rate'] * 100:.1f}%")
     
+    print(f"\n  --- Ordinal Metrics ---")
+    print(f"  Ordinal MAE:             {metrics.get('ordinal_mae', 'N/A')}")
+    print(f"  Severity-weighted error: {metrics.get('severity_weighted_error', 'N/A')}")
+    
+    print(f"\n  --- Quality-Cost Utility ---")
+    print(f"  Utility (Q - λ×C):       {metrics.get('quality_cost_utility', 'N/A')}")
+    print(f"  Avg Quality:             {metrics.get('avg_quality', 'N/A')}")
+    print(f"  Normalized Cost:         {metrics.get('normalized_cost', 'N/A')}")
+    
     print(f"\n  --- Latency Analysis ---")
     print(f"  Latency savings vs always-strong: {metrics['latency_savings_vs_always_strong'] * 100:.1f}%")
     print(f"  Router avg latency:   {metrics['router_avg_latency_ms']:.0f}ms")
@@ -166,3 +215,4 @@ def print_routing_report(metrics: dict):
         print(f"    Class {label} ({names.get(int(label), '?')}): {rate * 100:.1f}%")
     
     print("=" * 60)
+

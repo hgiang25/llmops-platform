@@ -99,7 +99,7 @@ class ModelEvaluator:
         # Predicted routing decisions
         if predicted_classes is None:
             return {"error": "predicted_classes must be provided (run predict_classes first)."}
-
+        
         pred_routes = [self._label_to_route(l) for l in predicted_classes]
         pred_binary = [self._label_to_binary(l) for l in predicted_classes]
 
@@ -199,6 +199,74 @@ class ModelEvaluator:
         self._save_report(report)
 
         return report
+
+    def predict_ordinal(
+        self,
+        model_path: str,
+        test_data: list[dict],
+        max_seq_length: int = 512,
+    ) -> list[int]:
+        """
+        Run inference using a DeBERTaOrdinalClassifier.
+        """
+        import torch
+        from transformers import AutoTokenizer
+        from mlops.training.ordinal_model import DeBERTaOrdinalClassifier
+        
+        path = Path(model_path)
+        config_path = path / "model_config.json"
+        
+        if not config_path.exists():
+            print(f"  [ERROR] Model config not found at {config_path}")
+            return [1] * len(test_data)
+            
+        with open(config_path, "r") as f:
+            model_config = json.load(f)
+            
+        base_model = model_config.get("base_model", "microsoft/deberta-v3-base")
+        n_classes = model_config.get("num_labels", 3)
+        ordinal_config = model_config.get("ordinal_head", {})
+        
+        tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
+        model = DeBERTaOrdinalClassifier(
+            model_name=base_model,
+            hidden_dim=ordinal_config.get("hidden_dim", 256),
+            n_classes=n_classes,
+        )
+        
+        model_pt_path = path / "model.pt"
+        if model_pt_path.exists():
+            model.load_state_dict(torch.load(model_pt_path, map_location="cpu"))
+        else:
+            print(f"  [WARNING] Model weights not found at {model_pt_path}")
+            
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model.to(device)
+        model.eval()
+        
+        predictions = []
+        prompts = [r.get("prompt", r.get("instruction", "")) for r in test_data]
+        
+        batch_size = 16
+        with torch.no_grad():
+            for i in range(0, len(prompts), batch_size):
+                batch_prompts = prompts[i:i + batch_size]
+                inputs = tokenizer(
+                    batch_prompts,
+                    padding=True,
+                    truncation=True,
+                    max_length=max_seq_length,
+                    return_tensors="pt"
+                ).to(device)
+                
+                result = model.predict(
+                    input_ids=inputs["input_ids"],
+                    attention_mask=inputs["attention_mask"]
+                )
+                preds = result["predictions"].cpu().tolist()
+                predictions.extend(preds)
+                
+        return predictions
 
     def compare_models(
         self,
