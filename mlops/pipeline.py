@@ -82,18 +82,23 @@ class MLOpsPipeline:
             data_result = self._step_generate_data(generate_data)
 
             # ----------------------------------------------------------
-            # Step 2: Drift Detection
+            # Step 2: Drift Detection & Quality Monitoring
             # ----------------------------------------------------------
-            self._log_step("DRIFT", "Running drift detection with Evidently AI...")
+            self._log_step("DRIFT", "Running 3-tier drift detection (Data, Routing, Quality)...")
+            
+            # The drift detector will read the output of the Batch Scorer
             drift_result = self._step_detect_drift()
 
-            drift_detected = drift_result.get("drift_detected", False)
+            overall_conclusion = drift_result.get("overall_conclusion", "unknown")
+            retrain_recommended = drift_result.get("retrain_recommended", False)
+            
             self._log_step(
                 "DRIFT",
-                f"Drift detected: {drift_detected} "
-                f"(share: {drift_result.get('drift_share', 0)}, "
-                f"columns: {drift_result.get('drifted_columns', [])})",
+                f"Conclusion: {overall_conclusion}. Retrain recommended: {retrain_recommended}",
             )
+            if drift_result.get("warnings"):
+                for w in drift_result["warnings"]:
+                    self._log_step("DRIFT_WARNING", w)
 
             # ----------------------------------------------------------
             # Step 3: Evaluate Current Model
@@ -110,17 +115,17 @@ class MLOpsPipeline:
             # ----------------------------------------------------------
             # Step 4: Decision — Retrain?
             # ----------------------------------------------------------
-            should_retrain = force_retrain or drift_detected
+            should_retrain = force_retrain or retrain_recommended
 
             if not should_retrain:
-                self._log_step("DECISION", "No drift detected and no forced retrain. Pipeline complete.")
+                self._log_step("DECISION", "No retrain signal and no forced retrain. Pipeline complete.")
                 self.status = "completed"
                 return self._build_result(start_time, retrained=False, drift_result=drift_result,
                                           current_eval=current_eval)
 
             self._log_step(
                 "DECISION",
-                f"Retraining triggered! Reason: {'forced' if force_retrain else 'drift detected'}",
+                f"Retraining triggered! Reason: {'forced' if force_retrain else drift_result.get('retrain_reason')}",
             )
 
             # ----------------------------------------------------------
@@ -207,70 +212,61 @@ class MLOpsPipeline:
 
     def _step_generate_data(self, generate: bool) -> dict:
         """
-        Step 1: Generate or Collect data.
-        Sử dụng batch scorer để chấm điểm log thực tế từ API Gateway.
+        Step 1: Data Collection & Scoring.
+        Runs the new Batch Scorer (Semantic KNN + Feedback) on API Gateway logs.
         """
         if not generate:
             return {"status": "skipped"}
 
-        import json
         import os
         from pathlib import Path
-        from mlops.data_pipeline.batch_scorer import run_batch_scoring
+        from mlops.scoring.batch_scorer import BatchScorer
         
-        # 1. Đảm bảo Reference data tồn tại (dùng nửa đầu của cloudops_real_dataset)
-        raw_data_path = "data/raw/cloudops_real_dataset.jsonl"
-        ref_data_path = "data/reference/cloudops_reference.jsonl"
-        
-        if not os.path.exists(ref_data_path) and os.path.exists(raw_data_path):
-            records = []
-            with open(raw_data_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    records.append(json.loads(line))
-            mid = len(records) // 2
-            Path("data/reference").mkdir(parents=True, exist_ok=True)
-            with open(ref_data_path, "w", encoding="utf-8") as f:
-                for record in records[:mid]:
-                    # Gán nhãn cho reference data
-                    score = record.get("difficulty_score", 0.5)
-                    label = 0 if score < 0.4 else (1 if score < 0.7 else 2)
-                    record["ground_truth_label"] = label
-                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    
-        # 2. Chạy Batch Scorer trên logs của API Gateway để tạo Current data
         log_path = "data/raw/prompts_log.jsonl"
-        current_data_path = "data/current/cloudops_current.jsonl"
+        scored_dir = Path("data/scored")
+        scored_dir.mkdir(parents=True, exist_ok=True)
         
         if os.path.exists(log_path):
-            self._log_step("DATA", "Chạy Batch Scorer trên log thực tế của API Gateway...")
-            run_batch_scoring(input_log_path=log_path, output_path=current_data_path)
+            self._log_step("DATA", "Running Semantic KNN + Feedback Batch Scorer on API logs...")
+            scorer = BatchScorer()
+            report = scorer.run(input_path=log_path, force=False)
+            self._log_step(
+                "DATA",
+                f"Scored {report.get('scored_records', 0)} records. "
+                f"Avg Quality: {report.get('average_quality', 0):.2f}"
+            )
+            
+            # Write to current data for backward compatibility with evaluator
+            # We copy the latest scored records to current data path
+            output_path = report.get("output_path")
+            if output_path and os.path.exists(output_path):
+                import shutil
+                current_data_path = Path("data/current/cloudops_current.jsonl")
+                current_data_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(output_path, current_data_path)
         else:
-            self._log_step("DATA", "Không tìm thấy API log, tạo mock dữ liệu từ Real Dataset...")
-            if os.path.exists(raw_data_path):
-                records = []
-                with open(raw_data_path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        records.append(json.loads(line))
-                mid = len(records) // 2
-                Path("data/current").mkdir(parents=True, exist_ok=True)
-                with open(current_data_path, "w", encoding="utf-8") as f:
-                    for record in records[mid:mid+500]: # Lấy 500 records
-                        score = record.get("difficulty_score", 0.5)
-                        label = 0 if score < 0.4 else (1 if score < 0.7 else 2)
-                        record["ground_truth_label"] = label
-                        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            self._log_step("DATA", "API logs not found. Skipping scoring.")
 
         return {
-            "status": "generated",
+            "status": "scored",
             "source": "batch_scorer",
         }
 
     def _step_detect_drift(self) -> dict:
-        """Step 2: Run drift detection."""
+        """Step 2: Run 3-tier drift detection."""
         from mlops.monitoring.drift_detection import DriftDetector
+        import os
 
-        detector = DriftDetector()
-        return detector.check_drift()
+        # Find the latest scored data
+        scored_dir = "data/scored"
+        latest_scored = None
+        if os.path.exists(scored_dir):
+            files = [os.path.join(scored_dir, f) for f in os.listdir(scored_dir) if f.startswith("production_scores_") and f.endswith(".jsonl")]
+            if files:
+                latest_scored = max(files, key=os.path.getmtime)
+
+        detector = DriftDetector(scored_data_path=latest_scored)
+        return detector.check_drift(save_report=True)
 
     def _step_evaluate(self, model_name: str = "router_model", model_path: str = None) -> dict:
         """Step 3/6: Evaluate a model."""

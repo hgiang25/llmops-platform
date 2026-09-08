@@ -9,6 +9,7 @@ Thiết kế linh hoạt: local file storage cho dev, dễ mở rộng sang clou
 import json
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -50,13 +51,24 @@ class DataCollector:
         token_count: Optional[int] = None,
         response_text: str = "",
         metadata: Optional[dict] = None,
+        log_id: Optional[str] = None,
+        thumbs_up: bool = False,
+        thumbs_down: bool = False,
+        regenerate: bool = False,
     ) -> dict:
         """
         Log a single inference request with rich metadata.
 
+        Args:
+            log_id: Unique identifier for this log entry. Auto-generated if None.
+            thumbs_up: Whether user gave positive feedback.
+            thumbs_down: Whether user gave negative feedback.
+            regenerate: Whether user requested response regeneration.
+
         Returns the record dict that was persisted (useful for testing).
         """
         record = {
+            "log_id": log_id or str(uuid.uuid4()),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "prompt": prompt,
             "route": route,
@@ -67,10 +79,52 @@ class DataCollector:
             "response_text": response_text,
             "prompt_length": len(prompt),
             "prompt_word_count": len(prompt.split()),
+            "thumbs_up": thumbs_up,
+            "thumbs_down": thumbs_down,
+            "regenerate": regenerate,
             **(metadata or {}),
         }
         self._write_record(record)
         return record
+
+    def update_feedback(
+        self,
+        log_id: str,
+        thumbs_up: Optional[bool] = None,
+        thumbs_down: Optional[bool] = None,
+        regenerate: Optional[bool] = None,
+    ) -> bool:
+        """
+        Update feedback fields for an existing log entry by log_id.
+
+        Since JSONL does not support in-place updates, this reads all records,
+        updates the matching one, and rewrites the file.
+
+        Returns True if the record was found and updated, False otherwise.
+        """
+        if not self.log_file.exists():
+            return False
+
+        records = self.load_logs()
+        found = False
+
+        for record in records:
+            if record.get("log_id") == log_id:
+                if thumbs_up is not None:
+                    record["thumbs_up"] = thumbs_up
+                if thumbs_down is not None:
+                    record["thumbs_down"] = thumbs_down
+                if regenerate is not None:
+                    record["regenerate"] = regenerate
+                found = True
+                break
+
+        if found:
+            with open(self.log_file, "w", encoding="utf-8") as f:
+                for record in records:
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        return found
 
     def load_logs(self, last_n: Optional[int] = None) -> list[dict]:
         """
