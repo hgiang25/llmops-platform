@@ -3,8 +3,9 @@ Create Labels — Step 3: Construct routing labels from model scores.
 
 Usage:
     python scripts/create_labels.py
-    python scripts/create_labels.py --method all
+    python scripts/create_labels.py --method minimum_sufficient_model
     python scripts/create_labels.py --method mock_length
+    python scripts/create_labels.py --method all
 """
 
 import sys
@@ -17,8 +18,8 @@ from mlops.data_pipeline.label import label_ultrafeedback, label_mock_baseline
 
 def main():
     parser = argparse.ArgumentParser(description="Construct routing labels")
-    parser.add_argument("--method", type=str, default="ultrafeedback_score",
-                        choices=["ultrafeedback_score", "mock_length", "all"])
+    parser.add_argument("--method", type=str, default="minimum_sufficient_model",
+                        choices=["minimum_sufficient_model", "ultrafeedback_score", "mock_length", "all"])
     parser.add_argument("--input", type=str, default="data/processed/ultrafeedback_deduped.jsonl")
     parser.add_argument("--output_dir", type=str, default="data/labeled")
     parser.add_argument("--config", type=str, default=None)
@@ -29,8 +30,8 @@ def main():
     print("  STEP 3: CREATE ROUTING LABELS")
     print("=" * 70)
     
-    if args.method in ("ultrafeedback_score", "all"):
-        print("\n--- Method: UltraFeedback Score-based ---")
+    if args.method in ("minimum_sufficient_model", "ultrafeedback_score", "all"):
+        print(f"\n--- Method: {args.method} ---")
         label_ultrafeedback(
             input_path=args.input,
             output_path=f"{args.output_dir}/ultrafeedback_labeled.jsonl",
