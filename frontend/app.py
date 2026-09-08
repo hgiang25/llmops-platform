@@ -342,7 +342,7 @@ elif page == "🔄 Retraining Pipeline":
                 "POST",
                 "/mlops/run-pipeline",
                 {"force_retrain": force_retrain, "generate_data": generate_data},
-                timeout=300,
+                timeout=3600,
             )
 
         if err:

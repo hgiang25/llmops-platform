@@ -40,7 +40,15 @@ class RouterPredictor:
                     print("[API] Local adapter not found. Using fallback mock.")
                     return 0 if len(prompt) < 50 else 2
             else:
-                model_path = model_info.get("source")
+                import mlflow
+                print(f"[API] Downloading model artifacts from MLflow (MinIO)...")
+                try:
+                    local_path = mlflow.artifacts.download_artifacts(artifact_uri=model_info.get("source"))
+                    model_path = local_path
+                except Exception as e:
+                    print(f"[API] Error downloading artifacts: {e}")
+                    model_path = model_info.get("source")
+                    
                 if model_path.startswith("file:///"):
                     model_path = model_path[8:]
                 elif model_path.startswith("file://"):
