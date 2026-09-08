@@ -93,6 +93,12 @@ class ChatRequest(BaseModel):
     direct_route: str = None  # Optional: force a specific route (e.g., "weak", "strong")
 
 
+class FeedbackRequest(BaseModel):
+    thumbs_up: bool = False
+    thumbs_down: bool = False
+    regenerate: bool = False
+
+
 class MLOpsTriggerRequest(BaseModel):
     force_retrain: bool = False
     generate_data: bool = True
@@ -142,7 +148,7 @@ async def chat_endpoint(request: ChatRequest):
         elapsed = (time.time() - start_time) * 1000
 
         # Log the request
-        data_collector.log_request(
+        record = data_collector.log_request(
             prompt=request.prompt,
             route=request.direct_route,
             difficulty_score=0.0,
@@ -150,7 +156,7 @@ async def chat_endpoint(request: ChatRequest):
             response_time_ms=round(elapsed, 2),
             response_text=response_text,
         )
-        return {"response": response_text}
+        return {"response": response_text, "log_id": record["log_id"]}
 
     # 2. Difficulty-Aware Routing
     try:
@@ -186,7 +192,7 @@ async def chat_endpoint(request: ChatRequest):
         elapsed = (time.time() - start_time) * 1000
 
         # Log the request to DataCollector
-        data_collector.log_request(
+        record = data_collector.log_request(
             prompt=request.prompt,
             route=route,
             difficulty_score=difficulty_score,
@@ -200,10 +206,24 @@ async def chat_endpoint(request: ChatRequest):
             "difficulty_score": difficulty_score,
             "route": route,
             "model_used": model_used,
+            "log_id": record["log_id"],
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/chat/{log_id}/feedback")
+async def submit_feedback(log_id: str, request: FeedbackRequest):
+    """Submit user feedback for a specific chat response."""
+    updated = data_collector.update_feedback(
+        log_id=log_id,
+        thumbs_up=request.thumbs_up,
+        thumbs_down=request.thumbs_down,
+        regenerate=request.regenerate
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Log entry not found")
+    return {"status": "success", "message": "Feedback recorded"}
 
 
 # =====================================================================

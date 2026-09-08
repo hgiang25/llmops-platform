@@ -109,24 +109,54 @@ if page == "💬 Inference":
 
     # Handle send
     if send_auto and prompt:
-        data, err = api_call("POST", "/chat", {"prompt": prompt})
+        with st.spinner("Routing and generating response..."):
+            data, err = api_call("POST", "/chat", {"prompt": prompt})
         if err:
             st.error(err)
         else:
-            st.success("✅ Request Processed!")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Difficulty Score", f"{data.get('difficulty_score', 'N/A'):.2f}")
-            c2.metric("Route", data.get("route", "N/A"))
-            c3.metric("Model", data.get("model_used", "N/A"))
-            st.info(f"**Response:** {data.get('response', 'N/A')}")
+            st.session_state["chat_result"] = data
+            st.session_state["feedback_given"] = False
 
     if send_direct and prompt and route_option:
-        data, err = api_call("POST", "/chat", {"prompt": prompt, "direct_route": route_option})
+        with st.spinner("Generating response..."):
+            data, err = api_call("POST", "/chat", {"prompt": prompt, "direct_route": route_option})
         if err:
             st.error(err)
         else:
-            st.success(f"✅ Direct route to **{route_option}**")
-            st.info(f"**Response:** {data.get('response', 'N/A')}")
+            st.session_state["chat_result"] = data
+            st.session_state["feedback_given"] = False
+
+    # Display result and feedback buttons
+    if "chat_result" in st.session_state:
+        data = st.session_state["chat_result"]
+        st.success("✅ Request Processed!")
+        c1, c2, c3 = st.columns(3)
+        if "difficulty_score" in data:
+            c1.metric("Difficulty Score", f"{data.get('difficulty_score', 'N/A'):.2f}")
+        c2.metric("Route", data.get("route", "Direct" if "difficulty_score" not in data else "N/A"))
+        c3.metric("Model", data.get("model_used", "N/A"))
+        st.info(f"**Response:**\n\n{data.get('response', 'N/A')}")
+        
+        # Feedback Section
+        log_id = data.get("log_id")
+        if log_id and not st.session_state.get("feedback_given"):
+            st.markdown("### Rate this response")
+            f1, f2, f3, _ = st.columns([1, 1, 1, 5])
+            
+            if f1.button("👍 Good"):
+                api_call("POST", f"/chat/{log_id}/feedback", {"thumbs_up": True})
+                st.session_state["feedback_given"] = True
+                st.rerun()
+            if f2.button("👎 Bad"):
+                api_call("POST", f"/chat/{log_id}/feedback", {"thumbs_down": True})
+                st.session_state["feedback_given"] = True
+                st.rerun()
+            if f3.button("🔄 Regenerate"):
+                api_call("POST", f"/chat/{log_id}/feedback", {"regenerate": True})
+                st.session_state["feedback_given"] = True
+                st.rerun()
+        elif st.session_state.get("feedback_given"):
+            st.success("Thank you for your feedback! This helps monitor model quality.")
 
 
 # =====================================================================
@@ -198,8 +228,8 @@ elif page == "🔍 Drift Detection":
         "to detect distribution shifts that may degrade model performance."
     )
 
-    if st.button("🔍 Run Drift Detection", use_container_width=True):
-        with st.spinner("Running drift detection with Evidently AI..."):
+    if st.button("🔍 Run 3-Tier Drift Detection", use_container_width=True, type="primary"):
+        with st.spinner("Running 3-tier drift detection (Data, Routing, Quality)..."):
             data, err = api_call("POST", "/mlops/check-drift")
 
         if err:
@@ -207,49 +237,85 @@ elif page == "🔍 Drift Detection":
             if "not found" in str(err).lower():
                 st.warning("Generate synthetic data first by running the Retraining Pipeline.")
         else:
-            # Display results
-            drift_detected = data.get("drift_detected", False)
-
-            if drift_detected:
-                st.error("⚠️ DRIFT DETECTED!")
+            st.subheader("📋 Overall Assessment")
+            
+            # Overall Conclusion
+            retrain = data.get("retrain_recommended", False)
+            if retrain:
+                st.error(f"🚨 RETRAIN RECOMMENDED: {data.get('overall_conclusion', 'N/A')}")
+                if data.get("retrain_reason"):
+                    st.info(f"**Reason:** {data.get('retrain_reason')}")
             else:
-                st.success("✅ No significant drift detected.")
-
-            # Key metrics
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Drift Detected", "YES ⚠️" if drift_detected else "NO ✅")
-            c2.metric("Drift Share", f"{data.get('drift_share', 0):.1%}")
-            c3.metric("Drifted Columns", data.get("n_drifted_columns", 0))
-            c4.metric("Method", data.get("method", "N/A"))
-
-            # Drifted columns
-            drifted = data.get("drifted_columns", [])
-            if drifted:
-                st.markdown(f"**Drifted columns:** `{'`, `'.join(drifted)}`")
-
-            # Per-column details
-            details = data.get("details", {})
-            if details:
-                st.markdown("### Per-Column Details")
-                for col_name, info in details.items():
-                    icon = "🔴" if info.get("drift_detected") else "🟢"
-                    score = info.get("drift_score", info.get("divergence", "N/A"))
-                    st.markdown(
-                        f"{icon} **{col_name}** — "
-                        f"Score: `{score}` | "
-                        f"Test: `{info.get('stattest_name', 'N/A')}`"
-                    )
+                st.success(f"✅ SYSTEM HEALTHY: {data.get('overall_conclusion', 'N/A')}")
+                
+            # Warnings
+            warnings = data.get("warnings", [])
+            if warnings:
+                for w in warnings:
+                    st.warning(f"⚠️ {w}")
+                    
+            st.markdown("---")
+            
+            # Tier 1: Data Drift
+            st.subheader("1️⃣ Data Drift (Input Distribution)")
+            dd = data.get("data_drift", {})
+            if dd.get("detected"):
+                st.warning("⚠️ Data Drift Detected (Warning Only)")
+            else:
+                st.success("✅ Data Distribution Stable")
+                
+            c1, c2 = st.columns(2)
+            c1.metric("Drift Share", f"{dd.get('drift_share', 0):.1%}")
+            c2.metric("Drifted Columns", dd.get("n_drifted_columns", 0))
+            if dd.get("drifted_columns"):
+                st.markdown(f"**Drifted:** `{'`, `'.join(dd['drifted_columns'])}`")
+                
+            st.markdown("---")
+            
+            # Tier 2: Routing Drift
+            st.subheader("2️⃣ Routing Drift (Output Distribution)")
+            rd = data.get("routing_drift", {})
+            if rd.get("detected"):
+                st.warning("⚠️ Routing Drift Detected")
+            else:
+                st.success("✅ Routing Distribution Stable")
+                
+            rc1, rc2 = st.columns(2)
+            rc1.metric("L1 Divergence", f"{rd.get('divergence', 0):.4f}")
+            rc2.metric("Threshold", rd.get("threshold", 0.2))
+            
+            ref_dist = rd.get("reference_distribution", {})
+            cur_dist = rd.get("current_distribution", {})
+            if ref_dist and cur_dist:
+                st.markdown("**Distribution Changes:**")
+                for k in set(list(ref_dist.keys()) + list(cur_dist.keys())):
+                    ref_val = ref_dist.get(k, 0)
+                    cur_val = cur_dist.get(k, 0)
+                    st.text(f"  {k}: {ref_val:.1%} → {cur_val:.1%}")
+                    
+            st.markdown("---")
+            
+            # Tier 3: Quality Drift
+            st.subheader("3️⃣ Response Quality Drift")
+            qd = data.get("quality_drift", {})
+            
+            if qd.get("detected"):
+                st.error("🚨 Quality Degradation Detected (Retrain Signal)")
+            else:
+                st.success("✅ Quality Stable")
+                
+            qc1, qc2, qc3, qc4 = st.columns(4)
+            qc1.metric("Mean Quality", f"{qd.get('current_mean_quality', 0):.2f}", 
+                       f"{qd.get('current_mean_quality', 0) - qd.get('reference_mean_quality', 0):.2f}")
+            
+            qm = qd.get("quality_metrics", {})
+            qc2.metric("Negative Feedback", f"{qm.get('negative_feedback_rate_overall', 0):.1%}")
+            qc3.metric("Failure Rate", f"{qm.get('potential_failure_rate', 0):.1%}")
+            qc4.metric("Uncertain Rate", f"{qm.get('uncertain_rate', 0):.1%}")
 
             # Report link
             if data.get("report_path"):
-                st.markdown(f"📄 Full HTML report saved to: `{data['report_path']}`")
-
-            # Dataset info
-            st.caption(
-                f"Reference samples: {data.get('reference_samples', 'N/A')} | "
-                f"Current samples: {data.get('current_samples', 'N/A')} | "
-                f"Timestamp: {data.get('timestamp', 'N/A')[:19]}"
-            )
+                st.markdown(f"📄 Full JSON report saved to: `{data['report_path']}`")
 
 
 # =====================================================================
