@@ -19,6 +19,8 @@ lora:
     - "k_proj"
     - "v_proj"
     - "o_proj"
+  modules_to_save:            # CRITICAL: Save classification head weights
+    - "score"                 # Without this, score layer is random at inference
 
 training:
   num_epochs: 3

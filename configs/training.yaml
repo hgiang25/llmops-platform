@@ -1,15 +1,36 @@
 # =============================================================
 # Training Configuration for LLM Router
 # =============================================================
+# Supports two architectures:
+#   1. DeBERTa-v3-base + Ordinal Classification (recommended)
+#   2. Qwen2.5-0.5B + QLoRA Standard Classification (baseline)
 # Optimized for RTX 4050 Laptop GPU (~6GB VRAM)
 
+# --- Active Model Configuration ---
+# Switch architecture by changing "architecture" field
 model:
-  base_model: "Qwen/Qwen2.5-0.5B"
+  base_model: "microsoft/deberta-v3-base"
+  architecture: "ordinal_classification"  # "ordinal_classification" | "standard_classification"
   num_labels: 3
-  quant_type: "nf4"
-  double_quant: true
-  compute_dtype: "bfloat16"
 
+  # Ordinal classification head config (used when architecture = "ordinal_classification")
+  ordinal_head:
+    hidden_dim: 256
+    n_thresholds: 2            # K-1 = 2 for 3 classes (P(Y≥1), P(Y≥2))
+    dropout: 0.1
+    activation: "sigmoid"
+
+# --- Alternative Model (for comparison experiments) ---
+model_alternatives:
+  qlora_baseline:
+    base_model: "Qwen/Qwen2.5-0.5B"
+    architecture: "standard_classification"
+    num_labels: 3
+    quant_type: "nf4"
+    double_quant: true
+    compute_dtype: "bfloat16"
+
+# --- LoRA Config (used only for QLoRA baseline) ---
 lora:
   r: 16
   alpha: 32
@@ -19,19 +40,22 @@ lora:
     - "k_proj"
     - "v_proj"
     - "o_proj"
+  modules_to_save:                 # CRITICAL: Save classification head weights
+    - "score"                      # Without this, score layer is random at inference
   bias: "none"
   task_type: "SEQ_CLS"
 
+# --- Training Hyperparameters ---
 training:
   num_epochs: 3
-  per_device_train_batch_size: 2      # Reduced for 6GB VRAM
-  per_device_eval_batch_size: 4
-  gradient_accumulation_steps: 8      # Effective batch size = 2*8 = 16
-  learning_rate: 2.0e-4
+  per_device_train_batch_size: 8      # Reduced for 6GB VRAM
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 2      # Effective batch size = 2*8 = 16
+  learning_rate: 2.0e-5               # Lower LR for DeBERTa (vs 2e-4 for QLoRA)
   weight_decay: 0.01
   warmup_ratio: 0.1
   lr_scheduler_type: "cosine"
-  max_seq_length: 512                 # Reduced for VRAM. Most prompts < 512 tokens
+  max_seq_length: 512                 # Most prompts < 512 tokens
   logging_steps: 10
   eval_strategy: "epoch"
   save_strategy: "epoch"
@@ -40,7 +64,7 @@ training:
   greater_is_better: true
   bf16: true
   fp16: false
-  output_dir: "models/cloudops-llm-adapter"
+  output_dir: "models/deberta-router"
   report_to: "none"
 
 dataset:
@@ -57,17 +81,6 @@ resource_monitoring:
   log_samples_per_sec: true
   log_tokens_per_sec: true
 
-# Input format template for the model
-input_template: |
-  Classify the following user query into the appropriate model tier.
-  0 = Simple (weak model sufficient)
-  1 = Moderate (medium model needed)
-  2 = Complex (strong model required)
-
-  Query: {query}
-
-  Classification:
-
 # MLflow integration
 mlflow:
   tracking_uri: "http://localhost:5000"
@@ -76,4 +89,5 @@ mlflow:
 # Experiment matrix
 experiments:
   dataset_sizes: [500, 1000, 3000, 5000]
-  label_methods: ["ultrafeedback_score", "mock_length"]
+  label_methods: ["minimum_sufficient_model", "ultrafeedback_score", "mock_length"]
+  architectures: ["ordinal_classification", "standard_classification"]
