@@ -38,3 +38,7 @@ prometheus_client>=0.17.0
 pyyaml>=6.0
 scipy>=1.11.0
 datasets>=2.14.0
+
+# Semantic KNN Scoring (Batch Scorer)
+sentence-transformers>=2.2.0
+faiss-cpu>=1.7.4
