@@ -1,10 +1,15 @@
 """
-Train Router — Step 6: Fine-tune Qwen2.5-0.5B with QLoRA.
+Train Router — Step 6: Fine-tune router model.
+
+Supports two architectures:
+  - DeBERTa-v3-base + Ordinal Classification (recommended)
+  - Qwen2.5-0.5B + QLoRA Standard Classification (baseline)
 
 Usage:
     python scripts/train_router.py
-    python scripts/train_router.py --config configs/training.yaml
-    python scripts/train_router.py --mock    # Mock training for testing pipeline
+    python scripts/train_router.py --architecture ordinal_classification
+    python scripts/train_router.py --architecture standard_classification
+    python scripts/train_router.py --mock
 """
 
 import sys
@@ -18,9 +23,12 @@ from pathlib import Path
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train LLM Router with QLoRA")
+    parser = argparse.ArgumentParser(description="Train LLM Router")
     parser.add_argument("--config", type=str, default="configs/training.yaml",
                         help="Training config YAML")
+    parser.add_argument("--architecture", type=str, default=None,
+                        choices=["ordinal_classification", "standard_classification"],
+                        help="Model architecture (default: from config)")
     parser.add_argument("--dataset", type=str, default=None,
                         help="Override train dataset path")
     parser.add_argument("--output_dir", type=str, default=None,
@@ -30,22 +38,24 @@ def main():
     
     args = parser.parse_args()
     
-    print("=" * 70)
-    print("  STEP 6: TRAIN ROUTER (QLoRA Fine-tuning)")
-    print("=" * 70)
-    
     # Load config
     config_path = Path(args.config)
     if not config_path.exists():
-        # Fallback to old config
         config_path = Path("mlops/training/train_config.yaml")
     
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     
+    # Determine architecture
+    architecture = args.architecture or config.get("model", {}).get("architecture", "ordinal_classification")
+    
+    print("=" * 70)
+    print(f"  STEP 6: TRAIN ROUTER ({architecture})")
+    print("=" * 70)
+    
     # Override from args
     dataset_path = args.dataset or config.get("dataset", {}).get("train_path", "data/splits/train.jsonl")
-    output_dir = args.output_dir or config.get("training", {}).get("output_dir", "models/cloudops-llm-adapter")
+    output_dir = args.output_dir or config.get("training", {}).get("output_dir", "models/deberta-router")
     
     if not Path(dataset_path).exists():
         print(f"\nERROR: Training data not found at {dataset_path}")
@@ -62,15 +72,20 @@ def main():
     with open(dataset_path, "r", encoding="utf-8") as f:
         n_samples = sum(1 for line in f if line.strip())
     
-    print(f"\n  Config:    {config_path}")
-    print(f"  Dataset:   {dataset_path} ({n_samples} samples)")
-    print(f"  Output:    {output_dir}")
-    print(f"  Model:     {config.get('model', {}).get('base_model', 'unknown')}")
-    print(f"  Mock:      {args.mock}")
+    print(f"\n  Config:       {config_path}")
+    print(f"  Architecture: {architecture}")
+    print(f"  Dataset:      {dataset_path} ({n_samples} samples)")
+    print(f"  Output:       {output_dir}")
+    print(f"  Model:        {config.get('model', {}).get('base_model', 'unknown')}")
+    print(f"  Mock:         {args.mock}")
     
-    from mlops.training.finetune import QLoRATrainer
+    from mlops.training.finetune import DeBERTaOrdinalTrainer, QLoRATrainer
     
-    trainer = QLoRATrainer(config=config)
+    if architecture == "ordinal_classification":
+        trainer = DeBERTaOrdinalTrainer(config=config)
+    else:
+        trainer = QLoRATrainer(config=config)
+    
     result = trainer.train(
         dataset_path=dataset_path,
         output_dir=output_dir,
