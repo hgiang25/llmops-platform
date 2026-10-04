@@ -22,73 +22,122 @@ data_collector = DataCollector(log_dir="data/raw")
 # =====================================================================
 
 class RouterPredictor:
+    """
+    Difficulty-aware router backed by the DeBERTa-v3 + Ordinal head model
+    trained on UltraFeedback-derived routing labels (data/splits/train.jsonl).
+
+    Resolution order:
+      1. MLflow registry model "cloudops-router" (if it contains model_config.json + model.pt)
+      2. Local trained model at models/deberta-router
+      3. Heuristic fallback (length-based) — flagged as mode="heuristic_fallback"
+    """
+    LOCAL_MODEL_DIR = os.environ.get("ROUTER_MODEL_DIR", "models/deberta-router")
+
     _model = None
     _tokenizer = None
+    _device = None
+    _max_len = 256
     _is_loaded = False
+    mode = "not_loaded"
+    model_source = None
+
+    @staticmethod
+    def _is_valid_model_dir(path: str) -> bool:
+        import json
+        cfg = os.path.join(path, "model_config.json")
+        if not (os.path.exists(cfg) and os.path.exists(os.path.join(path, "model.pt"))):
+            return False
+        with open(cfg, "r", encoding="utf-8") as f:
+            c = json.load(f)
+        return c.get("architecture") == "ordinal_classification" and not c.get("mock_training", False)
 
     @classmethod
-    def predict(cls, prompt: str) -> int:
-        if not cls._is_loaded:
+    def _resolve_model_dir(cls) -> Optional[str]:
+        try:
             from mlops.registry.mlflow_utils import ModelRegistry
-            registry = ModelRegistry()
-            model_info = registry.load_model(model_name="cloudops-router")
-            
-            if "error" in model_info:
-                print(f"[API] MLflow load failed ({model_info['error']}). Falling back to local adapter.")
-                model_path = "models/cloudops-llm-adapter"
-                if not os.path.exists(model_path):
-                    print("[API] Local adapter not found. Using fallback mock.")
-                    return 0 if len(prompt) < 50 else 2
-            else:
+            info = ModelRegistry().load_model(model_name="cloudops-router")
+            if "error" not in info:
                 import mlflow
-                print(f"[API] Downloading model artifacts from MLflow (MinIO)...")
-                try:
-                    local_path = mlflow.artifacts.download_artifacts(artifact_uri=model_info.get("source"))
-                    model_path = local_path
-                except Exception as e:
-                    print(f"[API] Error downloading artifacts: {e}")
-                    model_path = model_info.get("source")
-                    
-                if model_path.startswith("file:///"):
-                    model_path = model_path[8:]
-                elif model_path.startswith("file://"):
-                    model_path = model_path[7:]
-                
-            # pyrefly: ignore [missing-import]
-            import torch
-            # pyrefly: ignore [missing-import]
-            from transformers import AutoModelForSequenceClassification, AutoTokenizer
-            print(f"[API] Loading sequence classification router model from {model_path}...")
-            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-            if tokenizer.pad_token is None:
-                tokenizer.pad_token = tokenizer.eos_token
-                
-            model = AutoModelForSequenceClassification.from_pretrained(
-                model_path,
-                num_labels=3,
-                device_map="auto",
-                trust_remote_code=True,
-                torch_dtype=torch.float16,
-            )
-            if model.config.pad_token_id is None:
-                model.config.pad_token_id = tokenizer.pad_token_id
-            
-            cls._tokenizer = tokenizer
-            cls._model = model
-            cls._model.eval()
-            cls._is_loaded = True
+                local = mlflow.artifacts.download_artifacts(artifact_uri=info.get("source"))
+                if cls._is_valid_model_dir(local):
+                    cls.model_source = f"mlflow:cloudops-router/v{info.get('version')}"
+                    return local
+                print(f"[API] MLflow model v{info.get('version')} is not a trained DeBERTa ordinal router. Ignoring.")
+        except Exception as e:
+            print(f"[API] MLflow unavailable ({e}).")
 
-        input_text = prompt
-        inputs = cls._tokenizer(input_text, return_tensors="pt", padding=True, truncation=True, max_length=512).to(cls._model.device)
-        
+        if cls._is_valid_model_dir(cls.LOCAL_MODEL_DIR):
+            cls.model_source = f"local:{cls.LOCAL_MODEL_DIR}"
+            return cls.LOCAL_MODEL_DIR
+        return None
+
+    @classmethod
+    def load(cls):
+        if cls._is_loaded:
+            return
+        import json
+        model_dir = cls._resolve_model_dir()
+        if model_dir is None:
+            print("[API] No trained router found. Run: python scripts/train_router.py — using heuristic fallback.")
+            cls.mode = "heuristic_fallback"
+            cls._is_loaded = True
+            return
+
         # pyrefly: ignore [missing-import]
         import torch
+        # pyrefly: ignore [missing-import]
+        from transformers import AutoTokenizer
+        from mlops.training.ordinal_model import DeBERTaOrdinalClassifier
+
+        with open(os.path.join(model_dir, "model_config.json"), "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        base_model = cfg.get("base_model", "microsoft/deberta-v3-base")
+        head_cfg = cfg.get("ordinal_head", {})
+
+        print(f"[API] Loading DeBERTa ordinal router from {model_dir} ...")
+        tok_src = model_dir if os.path.exists(os.path.join(model_dir, "tokenizer_config.json")) else base_model
+        cls._tokenizer = AutoTokenizer.from_pretrained(tok_src)
+        model = DeBERTaOrdinalClassifier(
+            model_name=base_model,
+            hidden_dim=head_cfg.get("hidden_dim", 256),
+            n_classes=cfg.get("num_labels", 3),
+            dropout=head_cfg.get("dropout", 0.1),
+        )
+        model.load_state_dict(torch.load(os.path.join(model_dir, "model.pt"), map_location="cpu"))
+        cls._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        cls._model = model.to(cls._device).eval()
+        cls.mode = "deberta_ordinal"
+        cls._is_loaded = True
+        print(f"[API] Router ready on {cls._device} (source={cls.model_source}).")
+
+    @classmethod
+    def predict(cls, prompt: str) -> dict:
+        """Return {'label': 0|1|2, 'probs': [p0,p1,p2], 'difficulty_score': float}."""
+        cls.load()
+        if cls.mode == "heuristic_fallback":
+            label = 0 if len(prompt) < 50 else 2
+            probs = [1.0 if i == label else 0.0 for i in range(3)]
+            return {"label": label, "probs": probs, "difficulty_score": label / 2.0}
+
+        # pyrefly: ignore [missing-import]
+        import torch
+        inputs = cls._tokenizer(
+            prompt, return_tensors="pt", truncation=True, max_length=cls._max_len
+        ).to(cls._device)
         with torch.no_grad():
-            outputs = cls._model(**inputs)
-            logits = outputs.logits
-            pred_class = torch.argmax(logits, dim=-1).item()
+            out = cls._model(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"])
+        probs = out["probs"][0].float().cpu().tolist()
+        label = int(out["predictions"][0].item())
+        import math
+        if any(math.isnan(p) for p in probs):
+            print("[API] Warning: Router returned NaN probabilities. Fallback to Weak mode.")
+            probs = [1.0, 0.0, 0.0]
+            label = 0
             
-        return pred_class
+        # Expected ordinal difficulty in [0, 1]
+        difficulty = (probs[1] * 1 + probs[2] * 2) / 2.0
+        return {"label": label, "probs": [round(p, 4) for p in probs], "difficulty_score": round(difficulty, 4)}
+
 
 
 
@@ -168,9 +217,10 @@ async def chat_endpoint(request: ChatRequest):
 
     # 2. Difficulty-Aware Routing
     try:
-        # Use real Router model (classification 0, 1, 2)
-        predicted_class = await asyncio.to_thread(RouterPredictor.predict, request.prompt)
-        difficulty_score = float(predicted_class) / 2.0  # map 0->0.0, 1->0.5, 2->1.0 for logs
+        # Use real Router model (DeBERTa ordinal, trained on UltraFeedback)
+        router_out = await asyncio.to_thread(RouterPredictor.predict, request.prompt)
+        predicted_class = router_out["label"]
+        difficulty_score = router_out["difficulty_score"]
 
         if predicted_class == 0:
             model_path = "Weak Model (vLLM Qwen 0.5B)"
@@ -214,11 +264,21 @@ async def chat_endpoint(request: ChatRequest):
             "difficulty_score": difficulty_score,
             "route": route,
             "model_used": model_used,
+            "router_mode": RouterPredictor.mode,
+            "router_source": RouterPredictor.model_source,
+            "router_probs": router_out["probs"],
             "log_id": record["log_id"],
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/router/info")
+async def router_info():
+    """Show which router model is currently serving (trained DeBERTa vs heuristic fallback)."""
+    await asyncio.to_thread(RouterPredictor.load)
+    return {"mode": RouterPredictor.mode, "source": RouterPredictor.model_source}
 
 @router.post("/chat/{log_id}/feedback")
 async def submit_feedback(log_id: str, request: FeedbackRequest):
@@ -365,3 +425,4 @@ def _run_pipeline_background(pipeline, force_retrain: bool, generate_data: bool)
     except Exception as e:
         pipeline.status = "failed"
         pipeline._log_step("ERROR", f"Background pipeline failed: {str(e)}")
+        
