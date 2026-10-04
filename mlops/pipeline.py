@@ -131,7 +131,7 @@ class MLOpsPipeline:
             # ----------------------------------------------------------
             # Step 5: Retrain Model (QLoRA Fine-tune)
             # ----------------------------------------------------------
-            self._log_step("TRAIN", "Starting QLoRA fine-tuning...")
+            self._log_step("TRAIN", "Starting DeBERTa ordinal router training (UltraFeedback)...")
             train_result = self._step_retrain()
 
             self._log_step(
@@ -277,58 +277,59 @@ class MLOpsPipeline:
 
         evaluator = ModelEvaluator()
         
-        # Load test data từ reference dataset thay vì mock data
+        # Evaluate on the held-out UltraFeedback test split (routing_label 0/1/2)
         test_data = []
-        ref_path = "data/reference/cloudops_reference.jsonl"
-        if os.path.exists(ref_path):
-            with open(ref_path, "r", encoding="utf-8") as f:
+        test_path = "data/splits/test.jsonl"
+        if os.path.exists(test_path):
+            with open(test_path, "r", encoding="utf-8") as f:
                 for line in f:
                     if line.strip():
                         test_data.append(json.loads(line))
-            # Sample 100 records for fast evaluation
-            random.seed(123)
-            test_data = random.sample(test_data, min(100, len(test_data)))
         else:
-            self._log_step("ERROR", f"Không tìm thấy file eval {ref_path}")
-            test_data = []
+            self._log_step("ERROR", f"Không tìm thấy file eval {test_path}. Chạy scripts/split_dataset.py trước.")
+            return {"error": f"{test_path} not found"}
         
         # If no model_path is provided, resolve the current model
         if not model_path:
-            from mlops.registry.mlflow_utils import ModelRegistry
-            registry = ModelRegistry()
-            model_info = registry.load_model(model_name="cloudops-router")
-            if "error" not in model_info:
-                model_path = model_info.get("source")
-            else:
-                model_path = "models/cloudops-llm-adapter"
+            model_path = "models/deberta-router"
+            try:
+                from mlops.registry.mlflow_utils import ModelRegistry
+                import mlflow
+                model_info = ModelRegistry().load_model(model_name="cloudops-router")
+                if "error" not in model_info:
+                    candidate = mlflow.artifacts.download_artifacts(artifact_uri=model_info.get("source"))
+                    if os.path.exists(os.path.join(candidate, "model.pt")):
+                        model_path = candidate
+            except Exception as e:
+                self._log_step("EVAL", f"MLflow unavailable ({e}); using local {model_path}")
 
-        # Remove URI scheme for local file check
-        local_path = model_path.replace("file:///", "").replace("file://", "")
-        if not os.path.exists(local_path):
-            return {"error": f"Model path {model_path} not found."}
+        if not os.path.exists(os.path.join(model_path, "model.pt")):
+            return {"error": f"Trained router weights not found in {model_path}."}
 
         try:
-            predicted_scores = evaluator.predict_scores(local_path, test_data)
-            # pyrefly: ignore [unexpected-keyword]
-            return evaluator.evaluate(test_data, predicted_scores=predicted_scores, model_name=model_name)
+            predicted = evaluator.predict_ordinal(model_path, test_data, max_seq_length=256)
+            return evaluator.evaluate(test_data, predicted_classes=predicted, model_name=model_name)
         except Exception as e:
             return {"error": str(e)}
 
     def _step_retrain(self) -> dict:
         """
-        Run the QLoRA fine-tuning process on the current dataset.
-        Returns the path to the newly trained adapter.
+        Retrain the DeBERTa ordinal router on the UltraFeedback train split.
+        Returns the path to the newly trained model.
         """
-        # pyrefly: ignore [missing-import]
-        from mlops.training.finetune import QLoRATrainer, load_train_config
+        import yaml
+        from mlops.training.finetune import DeBERTaOrdinalTrainer
 
-        dataset_path = "data/reference/cloudops_reference.jsonl"
-        
-        # Initialize and run finetuner
-        config = load_train_config()
-        finetuner = QLoRATrainer(config=config)
+        with open("configs/training.yaml", "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+        dataset_path = config.get("dataset", {}).get("train_path", "data/splits/train.jsonl")
+        output_dir = "models/deberta-router-retrained"
+
+        trainer = DeBERTaOrdinalTrainer(config=config)
         # Pass self._log_step as callback to stream logs to the UI
-        return finetuner.train(dataset_path, callback=self._log_step)
+        result = trainer.train(dataset_path=dataset_path, output_dir=output_dir, callback=self._log_step)
+        result["adapter_path"] = result.get("model_path", output_dir)
+        return result
 
     def _step_register(self, train_result: dict, eval_report: dict) -> dict:
         """Step 8: Register model to MLflow."""
@@ -337,7 +338,7 @@ class MLOpsPipeline:
 
             registry = ModelRegistry()
 
-            adapter_path = train_result.get("adapter_path", "models/cloudops-llm-adapter")
+            adapter_path = train_result.get("adapter_path", "models/deberta-router")
 
             return registry.register_model(
                 model_name="cloudops-router",

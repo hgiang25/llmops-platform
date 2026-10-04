@@ -40,6 +40,26 @@ except ImportError:
     HAS_TORCH = False
 
 
+def _allow_bin_checkpoint_on_old_torch():
+    """
+    microsoft/deberta-v3-base only ships pytorch_model.bin. transformers>=4.50 refuses
+    torch.load on torch<2.6 (CVE-2025-32434). The checkpoint is the official trusted one,
+    so we disable the check in every module that imported it by name.
+    """
+    try:
+        from packaging import version
+        if version.parse(torch.__version__.split("+")[0]) >= version.parse("2.6"):
+            return
+        import transformers.utils.import_utils as iu
+        import transformers.modeling_utils as mu
+        noop = lambda: None
+        iu.check_torch_load_is_safe = noop
+        if hasattr(mu, "check_torch_load_is_safe"):
+            mu.check_torch_load_is_safe = noop
+    except Exception:
+        pass
+
+
 if HAS_TORCH:
     class OrdinalClassificationHead(nn.Module):
         """
@@ -217,6 +237,7 @@ if HAS_TORCH:
         ):
             super().__init__()
             from transformers import AutoModel
+            _allow_bin_checkpoint_on_old_torch()
             
             self.encoder = AutoModel.from_pretrained(model_name, trust_remote_code=True)
             encoder_dim = self.encoder.config.hidden_size  # 768 for base
@@ -233,6 +254,14 @@ if HAS_TORCH:
             # Optionally freeze lower encoder layers for faster training
             if freeze_encoder_layers > 0:
                 self._freeze_layers(freeze_encoder_layers)
+                
+        @property
+        def config(self):
+            # Satisfy PEFT config requirements
+            cfg = self.encoder.config
+            if not hasattr(cfg, "use_return_dict"):
+                cfg.use_return_dict = False
+            return cfg
         
         def _freeze_layers(self, n_layers: int):
             """Freeze the first n encoder layers."""

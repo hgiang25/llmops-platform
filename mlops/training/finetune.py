@@ -233,6 +233,20 @@ class DeBERTaOrdinalTrainer:
             dropout=ordinal_config.get("dropout", 0.1),
         )
         
+        if train_config.get("use_lora", False):
+            print("\nApplying LoRA to DeBERTa for stable fine-tuning...")
+            from peft import LoraConfig, get_peft_model
+            
+            lora_config = LoraConfig(
+                r=8,
+                lora_alpha=16,
+                target_modules=["query_proj", "key_proj", "value_proj", "dense"],
+                modules_to_save=["ordinal_head"],
+                lora_dropout=0.05,
+                bias="none",
+            )
+            model = get_peft_model(model, lora_config)
+            
         if torch.cuda.is_available():
             model = model.cuda()
         
@@ -274,7 +288,8 @@ class DeBERTaOrdinalTrainer:
             print(f"Validation samples: {len(val_records)}")
         
         def preprocess_function(examples):
-            inputs = tokenizer(examples["text"], padding="max_length", truncation=True, max_length=max_seq_length)
+            # Dynamic padding (DataCollatorWithPadding) saves VRAM vs. max_length padding
+            inputs = tokenizer(examples["text"], truncation=True, max_length=max_seq_length)
             inputs["labels"] = examples["label"]
             return inputs
         
@@ -292,13 +307,8 @@ class DeBERTaOrdinalTrainer:
                     labels=labels,
                 )
                 loss = outputs["loss"]
-                
-                class Outputs:
-                    def __init__(self, loss, logits):
-                        self.loss = loss
-                        self.logits = logits
-                
-                out = Outputs(loss=loss, logits=outputs["probs"])
+                # Return a dict so Trainer.prediction_step can extract logits (class probs)
+                out = {"loss": loss, "logits": outputs["probs"]}
                 if return_outputs:
                     return loss, out
                 return loss
@@ -334,17 +344,22 @@ class DeBERTaOrdinalTrainer:
             gradient_accumulation_steps=train_config.get("gradient_accumulation_steps", 2),
             learning_rate=train_config.get("learning_rate", 2e-5),
             weight_decay=train_config.get("weight_decay", 0.01),
-            # pyrefly: ignore [unexpected-keyword]
-            warmup_ratio=train_config.get("warmup_ratio", 0.1),
+            warmup_steps=int(
+                train_config.get("warmup_ratio", 0.1)
+                * (len(train_records) // (train_config.get("per_device_train_batch_size", 8)
+                                          * train_config.get("gradient_accumulation_steps", 2)))
+                * train_config.get("num_epochs", 3)
+            ),
             lr_scheduler_type=train_config.get("lr_scheduler_type", "cosine"),
             logging_steps=train_config.get("logging_steps", 10),
             eval_strategy="epoch" if eval_dataset else "no",
-            save_strategy="epoch",
-            load_best_model_at_end=True if eval_dataset else False,
-            metric_for_best_model="eval_f1_macro" if eval_dataset else None,
-            greater_is_better=True if eval_dataset else None,
+            # Custom nn.Module: skip HF checkpoints, final weights are saved as model.pt below
+            save_strategy="no",
+            load_best_model_at_end=False,
             bf16=train_config.get("bf16", True),
             fp16=train_config.get("fp16", False),
+            max_grad_norm=float(train_config.get("max_grad_norm", 1.0)),
+            adam_epsilon=float(train_config.get("adam_epsilon", 1e-8)),
             report_to="none",
         )
         
@@ -363,10 +378,17 @@ class DeBERTaOrdinalTrainer:
         train_result = trainer.train()
         elapsed = time.time() - start_time
         
+        eval_metrics = trainer.evaluate() if eval_dataset is not None else {}
+        print(f"Final validation metrics: {eval_metrics}")
+        
         # Save model
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         
+        if train_config.get("use_lora", False):
+            print("Merging LoRA weights into base model for zero inference latency...")
+            model = model.merge_and_unload()
+            
         torch.save(model.state_dict(), output_path / "model.pt")
         tokenizer.save_pretrained(output_dir)
         
@@ -404,7 +426,9 @@ class DeBERTaOrdinalTrainer:
                 "final_train_loss": round(train_result.training_loss, 4),
                 "total_training_time_s": round(elapsed, 2),
                 "trainable_params": params_info["trainable_params"],
+                **{k: v for k, v in eval_metrics.items() if isinstance(v, (int, float))},
             },
+            "dataset_path": dataset_path,
             "resource": resource_info,
         }
         
