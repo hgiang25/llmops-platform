@@ -19,10 +19,14 @@ def main():
     print("  DEPLOY MODEL TO MLFLOW")
     print("=" * 70)
 
-    model_path = "models/cloudops-llm-adapter"
-    if not os.path.exists(model_path):
-        print(f"ERROR: Model not found at {model_path}. Run train_router.py first.")
+    model_path = "models/deberta-router"
+    if not os.path.exists(os.path.join(model_path, "model.pt")):
+        print(f"ERROR: Trained weights not found at {model_path}/model.pt. Run train_router.py first.")
         return
+    with open(os.path.join(model_path, "model_config.json"), "r", encoding="utf-8") as f:
+        if json.load(f).get("mock_training", False):
+            print("ERROR: Model was produced by mock training. Refusing to deploy.")
+            return
 
     # Load latest evaluation metrics if available
     metrics = {}
@@ -62,7 +66,7 @@ def main():
         model_name="cloudops-router",
         model_path=model_path,
         metrics=metrics,
-        description="Manually trained and evaluated initial version (v1.0)",
+        description="DeBERTa-v3-base ordinal router trained on UltraFeedback routing labels",
     )
     
     version = reg_result.get("model_version")

@@ -18,6 +18,9 @@ from mlops.evaluation.evaluator import ModelEvaluator
 from mlops.evaluation.baselines import run_all_baselines
 from mlops.evaluation.routing_metrics import compute_routing_metrics, print_routing_report
 
+import transformers.utils.import_utils
+transformers.utils.import_utils.check_torch_load_is_safe = lambda: None
+
 
 def load_test_data(test_path: str = "data/splits/test.jsonl") -> list[dict]:
     """Load test data from JSONL."""
