@@ -156,7 +156,8 @@ class DataCollector:
         if not records:
             return {"total_records": 0}
 
-        difficulty_scores = [r["difficulty_score"] for r in records]
+        import math
+        difficulty_scores = [r["difficulty_score"] for r in records if r.get("difficulty_score") is not None and not math.isnan(r.get("difficulty_score", 0.0))]
         routes = [r.get("route", "unknown") for r in records]
         response_times = [
             r["response_time_ms"] for r in records if r.get("response_time_ms") is not None
@@ -164,9 +165,9 @@ class DataCollector:
 
         stats = {
             "total_records": len(records),
-            "avg_difficulty_score": round(sum(difficulty_scores) / len(difficulty_scores), 4),
-            "min_difficulty_score": round(min(difficulty_scores), 4),
-            "max_difficulty_score": round(max(difficulty_scores), 4),
+            "avg_difficulty_score": round(sum(difficulty_scores) / len(difficulty_scores), 4) if difficulty_scores else 0.0,
+            "min_difficulty_score": round(min(difficulty_scores), 4) if difficulty_scores else 0.0,
+            "max_difficulty_score": round(max(difficulty_scores), 4) if difficulty_scores else 0.0,
             "route_distribution": {
                 route: routes.count(route) for route in set(routes)
             },
