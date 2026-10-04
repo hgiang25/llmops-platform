@@ -14,7 +14,7 @@ st.set_page_config(
     layout="wide",
 )
 
-API_BASE = "http://localhost:8000"
+API_BASE = "http://localhost:8080"
 
 # =====================================================================
 # Sidebar — Navigation
@@ -61,7 +61,7 @@ def api_call(method: str, endpoint: str, json_data: dict = None, timeout: int = 
         else:
             return None, f"Error {resp.status_code}: {resp.text}"
     except requests.exceptions.ConnectionError:
-        return None, "❌ Connection failed. Is the API Gateway running on port 8000?"
+        return None, "❌ Connection failed. Is the API Gateway running on port 8080?"
     except requests.exceptions.Timeout:
         return None, "❌ Request timed out."
     except Exception as e:
@@ -171,7 +171,7 @@ elif page == "📊 MLOps Dashboard":
 
     if err:
         st.error(err)
-        st.info("Make sure the API Gateway is running: `uvicorn api_gateway.main:app --reload --port 8000`")
+        st.info("Make sure the API Gateway is running: `uvicorn api_gateway.main:app --reload --port 8080`")
     else:
         # Pipeline Status
         st.subheader("🔧 Pipeline Status")
